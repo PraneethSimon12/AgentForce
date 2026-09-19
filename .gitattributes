@@ -1,0 +1,7 @@
+# Normalise line endings in the repository. Without this, git checks text files out with
+# CRLF on Windows and LF in the Linux container, so the *same committed prompt file*
+# produces two different byte sequences — and therefore two different prompt-cache
+# prefixes — between a developer's machine and production. See adapters/prompts.py.
+* text=auto eol=lf
+*.png binary
+*.jpg binary

@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     run_token_budget: int = Field(
         default=120_000, ge=1_000, le=2_000_000, validation_alias="AGENTFORGE_RUN_TOKEN_BUDGET"
     )
+    max_output_tokens: int = Field(
+        default=16_000, ge=1_024, le=128_000, validation_alias="AGENTFORGE_MAX_OUTPUT_TOKENS"
+    )
     max_tool_retries: int = Field(
         default=2, ge=0, le=5, validation_alias="AGENTFORGE_MAX_TOOL_RETRIES"
     )
