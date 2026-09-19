@@ -460,6 +460,79 @@ whose loss is most silent.
 
 ---
 
+## v1.4, v1.6 — leases and the idempotency ledger · 2026-09-19
+
+---
+
+### Q24 — Walk me through the crash window. Where exactly can you lose, and what do you do about it?
+
+Four points, three gaps:
+
+    t0  ledger row written PENDING, committed
+    t1  the tool executes            <- the side effect, outside my database
+    t2  ledger completed with the result, committed
+    t3  step row committed
+
+**Crash between t0 and t1.** PENDING, and the tool definitely did not run. I cannot distinguish
+this from the next case, which is why it gets no separate treatment.
+
+**Crash between t1 and t2.** PENDING, and the tool may or may not have run. This is the window
+that cannot be closed — the side effect landed outside Postgres, so no transaction spans it and
+no amount of cleverness recovers the information. It is made *safe* rather than closed: every
+tool declares an effect class at definition time and that decides. READ_ONLY and
+IDEMPOTENT_WRITE re-execute; UNSAFE stops the run for a human.
+
+**Crash between t2 and t3.** SUCCEEDED with the result recorded, but the step was never
+committed. The resumed run redoes the step, the ledger recognises the call, and it returns the
+recorded result *without executing the tool again*. This window is fully closed, and closing it
+is why `complete()` commits on its own rather than inside the step transaction (D-021).
+
+So the honest claim is not exactly-once. It is at-least-once delivery with effectively-once
+outcomes, for tools whose author has said replay is acceptable — and a hard stop for those who
+have not.
+
+---
+
+### Q25 — Why is `tool_use_id` not part of the idempotency key?
+
+Because the provider generates a fresh one on every response. Putting it in the key would make
+the key different on every replay, so the ledger would never match anything — and the failure
+would be invisible: every mechanism would run, every row would be written, and nothing would ever
+be deduplicated. A broken safety mechanism that looks exactly like a working one.
+
+The key is `hash(run_id, step_idx, tool_name, args)`. `run_id` and `step_idx` scope it to one
+position in one run. `tool_name` and `args` mean a resumed step that produces the same call
+matches the record, while a step where the model changes its mind produces a different key and
+genuinely re-executes — which is correct, because it *is* a different call.
+
+One detail that is easy to miss: the arguments are serialised with `sort_keys=True`. Python dicts
+preserve insertion order and the model emits JSON in whatever order it likes, so without canonical
+serialisation the same call could hash two ways, with the same silent consequence.
+
+---
+
+### Q26 — You claim a lease with a single UPDATE rather than SELECT ... FOR UPDATE. Which is right?
+
+Both, for different jobs, and the distinction is the interesting part.
+
+For a **known run id** it is a single conditional UPDATE — set the owner where the id matches and
+the lease is either null or expired, returning the id. The row lock is taken by the UPDATE
+itself, so there is no window between deciding the lease is free and taking it. A SELECT followed
+by an UPDATE has that window, and under concurrency several workers pass through it together:
+the lost-update bug. There is a test that races twenty workers at one run and asserts exactly one
+winner.
+
+For **finding work** it is `SELECT ... ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1` inside
+the claiming transaction. The problem there is different: without SKIP LOCKED every polling
+worker blocks on the same first row and the pool serialises — ten workers delivering one
+worker's throughput. SKIP LOCKED makes each worker step over what others have locked.
+
+The other thing worth saying: every expiry comparison uses `now()` — the *database's* clock,
+never the worker's. Two workers with a few seconds of skew would otherwise disagree about whether
+a lease had expired, and both would believe they owned the run.
+
+---
+
 ## Questions I still owe answers to
 
 Open, to be answered as the phases land. Written down now so they are not quietly avoided.

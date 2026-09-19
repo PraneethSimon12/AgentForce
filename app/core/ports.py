@@ -30,8 +30,10 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
+from app.core.runtime.idempotency import InvocationDecision
 from app.core.runtime.messages import Effort, LLMResponse, Message, ToolSchema
 from app.core.runtime.state import NewRun, RunOutcome, RunRecord, StepRecord
+from app.core.tools.base import EffectClass
 
 
 class Clock(Protocol):
@@ -167,5 +169,49 @@ class RunStore(Protocol):
         Separate from `commit_step` because a run can end without a step succeeding —
         a budget refusal happens *before* a request is made, so there is no step to
         attach it to.
+        """
+        ...
+
+
+class ToolLedger(Protocol):
+    """
+    The record of which tool calls have been attempted, and how they turned out.
+
+    Separate from `RunStore` because it is written on a different schedule: a ledger row
+    is committed *before* the tool runs and a step row *after*, and a port that mixed the
+    two would invite someone to write them together — which would close the wrong window
+    and reopen the dangerous one.
+    """
+
+    async def begin(
+        self,
+        run_id: uuid.UUID,
+        step_idx: int,
+        tool_name: str,
+        effect_class: EffectClass,
+        key: str,
+    ) -> InvocationDecision:
+        """
+        Claim this invocation, or report what already happened to it.
+
+        Committed before the tool is executed, so a crash during execution leaves
+        evidence the attempt existed. The `UNIQUE(idempotency_key)` constraint is what
+        makes the claim atomic: two workers racing the same call produce one insert and
+        one conflict, and the loser reads the winner's row rather than executing.
+
+        Postcondition: on EXECUTE, a PENDING row exists and is committed.
+        """
+        ...
+
+    async def complete(self, key: str, result: str, *, is_error: bool) -> None:
+        """
+        Record the outcome, in its own transaction, immediately after execution.
+
+        Its own transaction and not the step's, deliberately. Completing here closes the
+        t2-t3 window entirely: a crash after this point finds SUCCEEDED on resume and
+        replays the recorded result instead of executing again. Deferring it to the step
+        commit would leave that window open and send more crashes down the ambiguous
+        PENDING path — including UNSAFE tools, which would then stop for human review
+        when they did not need to (D-021).
         """
         ...

@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
@@ -162,6 +162,131 @@ class PostgresRunStore:
             # query keep finding a run that has nothing left to do.
             run.lease_owner = None
             run.lease_expires_at = None
+
+    # --- Leases ----------------------------------------------------------------------
+    #
+    # Every expiry comparison below uses `func.now()` — the *database's* clock, never the
+    # worker's. Two workers with a few seconds of clock skew would otherwise disagree
+    # about whether a lease had expired, and both would believe they owned the run. One
+    # clock, in one place, removes the question.
+
+    async def claim(self, run_id: uuid.UUID, owner: str, ttl_seconds: int) -> RunRecord | None:
+        """
+        Take the lease on a known run, or return None because someone else holds it.
+
+        A single conditional UPDATE, not a SELECT followed by an UPDATE. The row lock is
+        taken by the UPDATE itself, so there is no window between deciding the lease is
+        free and taking it — which is exactly the lost-update bug that check-then-act
+        produces, and the one CLAUDE.md §8 names.
+
+        Returns None rather than raising: "someone else is already running this" is an
+        ordinary outcome of a recovery scan, not an error.
+        """
+        async with transaction(self._sessions) as session:
+            stmt = (
+                update(Run)
+                .where(
+                    Run.id == run_id,
+                    Run.status.in_(
+                        [RunStatus.QUEUED.value, RunStatus.RUNNING.value, RunStatus.PAUSED.value]
+                    ),
+                    or_(Run.lease_owner.is_(None), Run.lease_expires_at < func.now()),
+                )
+                .values(
+                    lease_owner=owner,
+                    lease_expires_at=func.now() + timedelta(seconds=ttl_seconds),
+                    status=RunStatus.RUNNING.value,
+                    started_at=func.coalesce(Run.started_at, func.now()),
+                )
+                .returning(Run.id)
+            )
+            claimed = (await session.execute(stmt)).scalar_one_or_none()
+        return None if claimed is None else await self.load(run_id)
+
+    async def claim_next_reclaimable(self, owner: str, ttl_seconds: int) -> RunRecord | None:
+        """
+        Find any run nobody is working on and take it. The crash-recovery scan.
+
+        `FOR UPDATE SKIP LOCKED` is what makes this safe to run on every worker at once:
+        without it, ten workers polling would all block on the same first row and the
+        pool would serialise. With it, each worker skips rows another worker has locked
+        and takes the next one, so throughput scales with workers instead of collapsing.
+
+        Oldest first, so a run abandoned by a crashed worker is picked up before newer
+        work rather than starving behind it.
+        """
+        async with transaction(self._sessions) as session:
+            candidate = (
+                await session.execute(
+                    select(Run.id)
+                    .where(
+                        Run.status.in_(
+                            [
+                                RunStatus.QUEUED.value,
+                                RunStatus.RUNNING.value,
+                                RunStatus.PAUSED.value,
+                            ]
+                        ),
+                        or_(Run.lease_owner.is_(None), Run.lease_expires_at < func.now()),
+                    )
+                    .order_by(Run.created_at)
+                    .limit(1)
+                    .with_for_update(skip_locked=True)
+                )
+            ).scalar_one_or_none()
+            if candidate is None:
+                return None
+            await session.execute(
+                update(Run)
+                .where(Run.id == candidate)
+                .values(
+                    lease_owner=owner,
+                    lease_expires_at=func.now() + timedelta(seconds=ttl_seconds),
+                    status=RunStatus.RUNNING.value,
+                    started_at=func.coalesce(Run.started_at, func.now()),
+                )
+            )
+        return await self.load(candidate)
+
+    async def renew(self, run_id: uuid.UUID, owner: str, ttl_seconds: int) -> bool:
+        """
+        Extend the lease, but only if we still hold it.
+
+        The `lease_owner == owner` predicate is the important half. A worker that paused
+        long enough for its lease to expire has *already* had the run taken from it, and
+        must find that out here rather than by continuing to write steps alongside the
+        new owner. Returns False in that case, and the loop stops.
+        """
+        async with transaction(self._sessions) as session:
+            stmt = (
+                update(Run)
+                .where(
+                    Run.id == run_id,
+                    Run.lease_owner == owner,
+                    Run.lease_expires_at > func.now(),
+                )
+                .values(lease_expires_at=func.now() + timedelta(seconds=ttl_seconds))
+                .returning(Run.id)
+            )
+            return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def release(
+        self, run_id: uuid.UUID, owner: str, *, status: RunStatus = RunStatus.PAUSED
+    ) -> None:
+        """
+        Give up the lease deliberately, leaving the run resumable.
+
+        The clean counterpart to a crash. A worker shutting down releases, so the run is
+        picked up immediately rather than after the lease TTL expires — which is the
+        difference between a rolling deploy costing nothing and costing one TTL per run
+        in flight.
+        """
+        async with transaction(self._sessions) as session:
+            await session.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.lease_owner == owner)
+                .values(lease_owner=None, lease_expires_at=None, status=status.value)
+            )
 
     # --- internals -------------------------------------------------------------------
 

@@ -567,3 +567,48 @@ silently branched on.
 **Revisit if** something outside this codebase starts writing these tables — a reporting job, a
 second service — at which point the database becomes the only place the constraint can live.
 
+---
+
+## D-021 — The ledger is completed in its own transaction, not the step's · 2026-09-19 · ACCEPTED · refines D-004
+
+**Context.** D-004 specified that a `tool_invocations` row is written `PENDING` before execution
+and "completed in the same transaction as the step row". Implementing it forced the timeline to
+be drawn properly, and that detail turns out to be the weaker of two options.
+
+**Decision.** `complete()` commits on its own, immediately after the tool returns and **before**
+the step is committed. D-004 stands in every other respect; only this detail is refined.
+
+**Why.** Four points, three gaps:
+
+    t0  ledger row PENDING committed
+    t1  tool executes            <- the side effect, outside Postgres
+    t2  ledger completed with the result
+    t3  step row committed
+
+A crash between **t2 and t3** is the common case — the tool finished, the next model call is
+where the time goes, and the process can die anywhere in between. Completing the ledger at t2
+closes that window *entirely*: the resumed run redoes the step, finds SUCCEEDED, and returns the
+recorded result without executing again.
+
+Deferring completion into the step transaction merges t2 into t3 and leaves that whole span
+reporting PENDING — the ambiguous state. Every crash in it would then be resolved by the effect
+class, so an `UNSAFE` tool that had already finished successfully would stop the run for human
+review it did not need. Strictly more manual intervention, for no gain.
+
+The window that remains, **t1 to t2**, is the one that genuinely cannot be closed: the side
+effect is not in our database, so no transaction covers it. That is what the effect class is for,
+and it is now the only such window.
+
+**Rejected.** Completing inside the step transaction (D-004 as literally written — sends more
+crashes down the ambiguous path). One transaction held open across t0-t3 (keeps a database
+transaction open across a tool call and an LLM call, which can be minutes; connection exhaustion
+under any real concurrency).
+
+**Give up.** A ledger row can say SUCCEEDED for a step that is not committed. That is intentional,
+and it is precisely the state a resume reads in order to avoid re-execution — the ledger records
+*attempts*, the step table records *progress*, and this decision is about not conflating them.
+
+**Revisit if** a tool ever needs its result to be atomically consistent with the step, which would
+mean the result is itself the side effect — at which point it belongs in our database and in the
+step transaction.
+

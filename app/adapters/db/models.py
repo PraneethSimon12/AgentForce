@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -243,4 +244,52 @@ class RunMessage(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "idx", name="uq_run_messages_run_idx"),
         CheckConstraint("idx >= 0", name="ck_run_messages_idx_non_negative"),
+    )
+
+
+class ToolInvocation(Base):
+    """
+    The idempotency ledger: one row per tool call, written before the call happens.
+
+    `UNIQUE(idempotency_key)` is what makes "did this already run?" answerable at all.
+    The row is inserted PENDING *before* execution, so a crash leaves evidence that the
+    attempt existed even though the side effect is outside this database.
+
+    Not folded into `run_steps`, despite being one-to-one-ish with a step's tool calls,
+    for one reason: it has to be committed **before** the step, and a step row cannot
+    exist before the step is done. They have different lifetimes, so they are different
+    rows.
+    """
+
+    __tablename__ = "tool_invocations"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+    )
+    step_idx: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # hash(run_id, step_idx, tool_name, args). Deliberately excludes the tool_use_id,
+    # which the provider regenerates on every response — including it would make the key
+    # different on every replay and the ledger would deduplicate nothing while looking
+    # like it worked.
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    tool_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    effect_class: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_error: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_utcnow()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_tool_invocations_key"),
+        Index("ix_tool_invocations_run", "run_id", "step_idx"),
     )
