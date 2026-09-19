@@ -71,10 +71,39 @@ real request goes out carrying that schema, the claim is half-earned and stays �
 
 | # | Claim | Evidence required | Phase | Status |
 | --- | --- | --- | --- | --- |
-| 2.1 | "checkpointing step state to PostgreSQL" | One committed row per step; `UNIQUE(run_id, idx)` | v1 | ⬜ |
+| 2.1 | "checkpointing step state to PostgreSQL" | One committed row per step; `UNIQUE(run_id, idx)` | v1 | ✅ |
 | 2.2 | "dispatching long-running tools to Celery workers" | A `DURABLE` tool executing off-process | v1 | ⬜ |
-| 2.3 | "with idempotency keys" | `tool_invocations` ledger; the key computed before execution | v1 | ⬜ |
-| 2.4 | **"a crashed run resumes from its last completed step"** | **The `kill -9` test**: run completes, tool ran exactly once, no duplicate steps | v1 | ⬜ |
+| 2.3 | "with idempotency keys" | `tool_invocations` ledger; the key computed before execution | v1 | ✅ |
+| 2.4 | **"a crashed run resumes from its last completed step"** | **The `kill -9` test**: run completes, tool ran exactly once, no duplicate steps | v1 | ✅ |
+
+**Status after the kill-9 test (v1 exit criterion, passing).** A real subprocess, really
+killed, against a real Postgres. `tests/integration/test_kill9.py`.
+
+- **2.1 ✅** — one committed row per step, `UNIQUE(run_id, idx)`, asserted at 2 rows after a
+  crash-and-resume with no duplicates.
+- **2.3 ✅** — the `tool_invocations` ledger, key written before execution.
+- **2.4 ✅** — the run completes on a replacement worker from its last committed step.
+- **2.2 stays ⬜** — nothing is dispatched to Celery yet (task 1.7). The bullet says
+  "dispatching long-running tools to Celery workers" and today every tool runs INLINE.
+
+⚠️ **E — be precise about "exactly once" before it reaches the CV.**
+
+The test proves two *different* things at two kill points, and only one of them is
+exactly-once execution:
+
+| Killed at | Tool body ran | World changed |
+| --- | --- | --- |
+| After the ledger was completed, before the step committed (t2–t3) | **once** | once |
+| Mid-tool, before the ledger knew (t1–t2) | **twice** | once |
+
+The second row is not a defect — it is the only honest outcome, because the side effect
+lands outside our database and nothing can know whether it happened. The second execution
+collapses because the tool is `IDEMPOTENT_WRITE` and its downstream deduplicates on a
+natural key.
+
+So the defensible phrasing is **"zero duplicate side effects"**, or "at-least-once
+execution with effectively-once outcomes". **"Zero duplicate tool executions" would be
+false**, and it is the kind of claim an interviewer probes first. Do not write it.
 
 **2.4 is the strongest claim in the whole bullet** and the one an interviewer will push hardest
 on. The follow-up is always the same — *"what happens if you crash between running the tool and

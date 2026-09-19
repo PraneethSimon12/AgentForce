@@ -533,6 +533,58 @@ a lease had expired, and both would believe they owned the run.
 
 ---
 
+## v1 exit — the kill-9 test · 2026-09-19
+
+---
+
+### Q27 — You say a crashed run resumes without repeating side effects. Prove it, and tell me where the claim stops.
+
+The test spawns a real worker as a subprocess, waits by polling the database until the
+run reaches a chosen instant, and kills the process. Not an exception, not a cancelled
+task, not a mock — those all run some of my code on the way down, and the code a real
+kill skips is exactly the code whose absence matters.
+
+It kills at two different instants, because they have different answers:
+
+**Killed after the ledger was completed, before the step committed.** The replacement
+re-asks the model, gets the same tool call back, and the ledger hands over the recorded
+result. The tool body runs **once** in total. One attempt, one outcome.
+
+**Killed mid-tool, before the ledger knew anything.** The ledger row says PENDING, which
+means genuinely nobody knows whether the effect landed. An `IDEMPOTENT_WRITE` tool is
+therefore executed again: **two attempts, one outcome**. The second collapses because the
+tool writes with `ON CONFLICT DO NOTHING` on a natural key — which is what declaring
+IDEMPOTENT_WRITE promises. A tool that declared it while doing a plain INSERT would be
+lying, and the ledger would faithfully permit the replay that doubled the row.
+
+Both runs end COMPLETED with exactly two step rows and no duplicates.
+
+So where the claim stops: this is **not** exactly-once execution and I would not say it
+is. It is at-least-once execution with effectively-once outcomes, and only for tools
+whose author has declared replay to be safe. `UNSAFE` tools stop the run for a human
+instead.
+
+---
+
+### Q28 — Why does the test count with its own tables instead of reading the ledger?
+
+Because reading the ledger would be asking the mechanism under test to grade its own
+work. If the idempotency key were computed wrongly — say it included the `tool_use_id`,
+so it never matched on replay — the ledger would contain two tidy rows and report
+success while the tool had in fact run twice.
+
+So the tool writes to two tables that know nothing about any of this.
+`test_side_effect_attempts` has no constraints and counts how many times the handler body
+actually executed. `test_side_effects` has `UNIQUE (run_id, label)` and counts what the
+world ended up with. Two counters, because a system can be correct with two attempts and
+one outcome, and cannot be correct with two outcomes.
+
+The other deliberate choice is polling instead of sleeping. `sleep(2)` would pass on a
+fast machine and kill the worker at the wrong instant on a slow one — producing a test
+that silently verifies a different claim than the one in its name.
+
+---
+
 ## Questions I still owe answers to
 
 Open, to be answered as the phases land. Written down now so they are not quietly avoided.
