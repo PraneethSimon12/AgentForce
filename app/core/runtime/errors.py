@@ -87,3 +87,15 @@ class ToolInputInvalid(ToolError):
         super().__init__(f"Invalid arguments for tool {tool_name!r}: {detail}")
         self.tool_name = tool_name
         self.detail = detail
+
+
+class ToolExecutionFailed(ToolError):
+    """
+    The tool ran and failed for a reason the model should be told about.
+
+    Deliberately distinct from an unexpected exception escaping a handler. This one says
+    "the call was well-formed but could not succeed" — division by zero, a document that
+    does not exist — and the loop turns it into a tool_result with is_error=True so the
+    model can try something else. An exception that is *not* this type is a bug in the
+    tool, and the loop must not paper over it by feeding it back as ordinary output.
+    """

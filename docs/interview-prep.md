@@ -301,6 +301,56 @@ claim, and the test that proves it asserts both halves from the same spec.
 
 ---
 
+## v0.4 — the first two tools · 2026-09-19
+
+---
+
+### Q17 — Your calculator parses an AST instead of calling eval(). Is that not over-engineering a toy?
+
+No, because of where the string comes from. The expression is written by the model, and the
+model's context contains retrieved documents and user-supplied text. So anything that can
+influence either of those can influence what gets evaluated — `__import__("os").system(...)` is
+one prompt injection away, and it is a valid Python expression that `eval` runs without
+complaint. "The model would not do that" is not a security property; the model is not the
+attacker, the person who wrote the document it retrieved is.
+
+So the tool parses the expression with `ast.parse` and walks the tree, permitting an explicit
+list of node types — numeric constants, unary plus and minus, seven binary operators — and
+refusing everything else by default. The default branch is the design: a blocklist of dangerous
+node types would need updating every time the language grows a feature, and would be wrong in the
+meantime.
+
+Two things fall out that are not about injection at all. `9 ** 999` is not an error in Python, it
+is a process that stops responding while it allocates an arbitrary-precision integer, so the
+exponent is capped. And `(-1) ** 0.5` returns a complex number while `1e308 * 10` returns `inf`,
+both silently — so the result is checked for being a finite real number before it is handed back
+as an answer.
+
+The general rule this instantiates: input from a model is untrusted input. Allow-list what you
+understand, reject the rest by default, and never let the model's good behaviour be the thing
+standing between an attacker and your process.
+
+---
+
+### Q18 — `now` is READ_ONLY, but re-running it returns a different answer. Is that not a contradiction?
+
+It looks like one only if READ_ONLY is read as "deterministic". It means **safe to re-execute** —
+that replaying the call does not change the world. `now` has no side effects at all, so replaying
+it is free, and D-004 resolves a READ_ONLY tool found PENDING after a crash by simply running it
+again.
+
+The wrinkle is real though: a resumed run sees time jump forward between the pre-crash attempt
+and the replay. That is fine for this tool because nothing downstream requires the two calls to
+agree. It would *not* be fine for a tool whose correctness depended on returning the same value
+twice — a token generator, a random sample used to partition data. Those need the recorded result
+replayed from the ledger instead of being re-executed, which is a different mechanism from the
+effect class and is worth not conflating.
+
+The short version: the effect class answers "what does replay do to the world?" It does not
+answer "does replay return the same value?" Only one of those questions is about safety.
+
+---
+
 ## Questions I still owe answers to
 
 Open, to be answered as the phases land. Written down now so they are not quietly avoided.

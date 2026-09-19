@@ -468,3 +468,38 @@ noisy).
 **Revisit if** tool definitions become repetitive enough that the boilerplate hides the two fields
 that matter, at which point the decorator must still require them positionally.
 
+---
+
+## D-018 — Tool dependencies arrive by closure, not by a context parameter · 2026-09-19 · ACCEPTED
+
+**Context.** `calculator` is a pure function and needs nothing. `now` has to read a clock, which
+is IO, which `core/` cannot reach for. That is the first tool to test the boundary, and every
+later tool — retrieval needs a `Retriever`, anything durable needs a store — has the same shape.
+
+**Decision.** A tool that needs a dependency is built by a factory that closes over the port:
+`clock_tool(clock: Clock) -> ToolSpec[NowInput]`. The handler signature stays
+`(validated_input) -> str`.
+
+**Why.** The alternative is a context parameter — `(input, ctx)` — where `ctx` carries the clock,
+the run id, a store, and whatever the next tool needs. That makes every tool pay for the union of
+every tool's dependencies, and the context object grows monotonically because nothing ever
+removes a field from it. It also weakens the type: `ctx.retriever` is present for tools that do
+not use it, so nothing states which dependencies a given tool actually has. The factory states it
+in its own signature, checked by mypy.
+
+The runtime facts a tool might seem to need — run id, step index — turn out not to be the tool's
+business: the idempotency key is computed by the runtime from `(run_id, step_idx, tool_name,
+args)` (D-004), and Celery dispatch is the runtime's job too. So the context object would mostly
+carry things tools should not have.
+
+**Rejected.** A context parameter on every handler (unstated dependencies, monotonic growth).
+Module-level singletons for the clock and retriever (the global-configuration problem of D-013,
+arriving through a different door, and it would put IO inside `core/`).
+
+**Give up.** A tool needing five dependencies gets a five-argument factory. If that happens, the
+factory's own arguments are the signal to reconsider — which is a visible signal, unlike a field
+quietly added to a shared context.
+
+**Revisit if** a tool genuinely needs per-invocation runtime state rather than per-registration
+dependencies, which is the one case a closure cannot express.
+
