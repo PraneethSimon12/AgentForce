@@ -9,10 +9,13 @@ an exception. They degrade behaviour quietly, which is why they need assertions.
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
 
+from app.adapters.db.memory import InMemoryRunStore, InMemoryToolLedger
 from app.adapters.llm.fake_llm import (
     FakeLLM,
     ScriptExhausted,
@@ -30,8 +33,7 @@ from app.core.runtime.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from app.core.runtime.policy import LoopPolicy, RunLimits
-from app.core.runtime.state import ErrorCode, RunStatus
+from app.core.runtime.state import ErrorCode, NewRun, RunLimits, RunOutcome, RunStatus
 from app.core.tools.base import EffectClass, ToolSpec
 from app.core.tools.builtin.calculator import calculator_tool
 from app.core.tools.builtin.clock import clock_tool
@@ -39,6 +41,40 @@ from app.core.tools.registry import ToolRegistry
 from tests.unit.test_builtin_tools import FrozenClock
 
 SYSTEM = "You are a test agent."
+OWNER = "test-worker"
+
+
+@dataclass
+class Harness:
+    """
+    Creates a run and drives it, so tests read the way they did before durability.
+
+    The loop under test is the real one — the same object that runs against Postgres.
+    Only the store and ledger are in-memory, which is the whole point of the ports:
+    there is no second loop for tests to accidentally verify instead.
+    """
+
+    loop: AgentLoop
+    store: InMemoryRunStore
+    ledger: InMemoryToolLedger
+    limits: RunLimits
+    run_id: uuid.UUID | None = None
+
+    async def run(self, user_input: str, *, owner: str = OWNER) -> RunOutcome:
+        if self.run_id is None:
+            record = await self.store.create(
+                NewRun(
+                    agent="tester",
+                    input={"query": user_input},
+                    limits=self.limits,
+                    effort="medium",
+                    prompt_name="test",
+                    prompt_version=1,
+                    model="fake-model-1",
+                )
+            )
+            self.run_id = record.id
+        return await self.loop.run(self.run_id, owner=owner)
 
 
 def build_loop(
@@ -46,19 +82,24 @@ def build_loop(
     *,
     limits: RunLimits | None = None,
     registry: ToolRegistry | None = None,
-) -> tuple[AgentLoop, FakeLLM]:
+    store: InMemoryRunStore | None = None,
+    ledger: InMemoryToolLedger | None = None,
+) -> tuple[Harness, FakeLLM]:
     llm = FakeLLM(script=script)  # type: ignore[arg-type]
     if registry is None:
         registry = ToolRegistry()
         registry.register(calculator_tool())
         registry.register(clock_tool(FrozenClock(datetime(2026, 9, 19, tzinfo=UTC))))
+    store = store or InMemoryRunStore()
+    ledger = ledger or InMemoryToolLedger()
     loop = AgentLoop(
         llm=llm,
         registry=registry,
-        policy=LoopPolicy(limits or RunLimits()),
-        system_prompt=SYSTEM,
+        store=store,
+        ledger=ledger,
+        load_prompt=lambda _name, _version: SYSTEM,
     )
-    return loop, llm
+    return Harness(loop=loop, store=store, ledger=ledger, limits=limits or RunLimits()), llm
 
 
 # --- The happy path ------------------------------------------------------------------
@@ -426,7 +467,7 @@ async def test_the_script_running_out_is_a_loud_failure() -> None:
         await loop.run("Add.")
 
 
-async def test_a_transport_error_from_the_provider_propagates_in_v0() -> None:
+async def test_a_transport_error_from_the_provider_propagates() -> None:
     """
     v0 has no retry — that is v1, task 1.8, and it is bounded at two levels (D-009).
 

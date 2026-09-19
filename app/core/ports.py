@@ -32,7 +32,7 @@ from typing import Protocol
 
 from app.core.runtime.idempotency import InvocationDecision
 from app.core.runtime.messages import Effort, LLMResponse, Message, ToolSchema
-from app.core.runtime.state import NewRun, RunOutcome, RunRecord, StepRecord
+from app.core.runtime.state import NewRun, RunOutcome, RunRecord, RunStatus, StepRecord
 from app.core.tools.base import EffectClass
 
 
@@ -169,6 +169,48 @@ class RunStore(Protocol):
         Separate from `commit_step` because a run can end without a step succeeding —
         a budget refusal happens *before* a request is made, so there is no step to
         attach it to.
+        """
+        ...
+
+    async def claim(self, run_id: uuid.UUID, owner: str, ttl_seconds: int) -> RunRecord | None:
+        """
+        Take the lease on a run, or return None because someone else holds it.
+
+        Must be atomic. A check that the lease is free followed by a separate write
+        taking it has a window in between, and under concurrency several workers pass
+        through that window together — which is two workers driving one run, each
+        believing it is alone. Returning None rather than raising, because a recovery
+        scan finding a run already in progress is ordinary.
+        """
+        ...
+
+    async def claim_next_reclaimable(self, owner: str, ttl_seconds: int) -> RunRecord | None:
+        """
+        Find any run nobody is working on and take it. The crash-recovery scan.
+
+        Oldest first, so a run abandoned by a crashed worker is picked up before newer
+        work rather than starving behind it.
+        """
+        ...
+
+    async def renew(self, run_id: uuid.UUID, owner: str, ttl_seconds: int) -> bool:
+        """
+        Extend the lease, but only if `owner` still holds it.
+
+        Returns False when it does not, and that answer is the point: a worker which
+        paused long enough for its lease to expire has *already* had the run taken away,
+        and must stop rather than write steps alongside its replacement.
+        """
+        ...
+
+    async def release(
+        self, run_id: uuid.UUID, owner: str, *, status: RunStatus = RunStatus.PAUSED
+    ) -> None:
+        """
+        Give up the lease deliberately, leaving the run resumable.
+
+        The clean counterpart to a crash: a worker shutting down releases, so the run is
+        picked up immediately instead of after the TTL expires.
         """
         ...
 

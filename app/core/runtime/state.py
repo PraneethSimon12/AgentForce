@@ -75,6 +75,15 @@ class ErrorCode(StrEnum):
     TOOL_FAILED = "TOOL_FAILED"
     """A tool raised something that was not a declared, recoverable failure — a bug."""
 
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    """
+    An UNSAFE tool was interrupted mid-flight and a human must resolve it.
+
+    Terminal by design, not by limitation (D-004): the alternatives are replaying a
+    call that might double its effect, or discarding a run that may have already
+    charged someone. Neither is ours to choose silently.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class RunLimits:
