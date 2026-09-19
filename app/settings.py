@@ -22,7 +22,11 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-Effort = Literal["low", "medium", "high", "xhigh", "max"]
+# Imported, not redefined. `Effort` is part of the request vocabulary that core owns;
+# config depends on the domain, never the other way round. Two copies of this literal
+# would drift the day a new level is added.
+from app.core.runtime.messages import Effort
+
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 

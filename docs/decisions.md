@@ -342,3 +342,71 @@ call `get_settings()`**; everything downstream receives a `Settings` it was give
 
 **Revisit if** per-tenant or per-run configuration overrides appear — a process-wide singleton
 would then be wrong in a second, worse way.
+
+---
+
+## D-014 — Core owns its message types, and only interpreted blocks get fields · 2026-09-19 · ACCEPTED
+
+**Context.** The loop needs a vocabulary for messages, blocks and responses. The `anthropic`
+SDK already ships exact types for all of it, and its own guidance is explicit: do not redefine
+SDK data structures, you lose type safety and duplicate what exists.
+
+**Decision.** `core/runtime/messages.py` defines AgentForge's own types. Only the three block
+kinds the loop actually interprets — `text`, `tool_use`, `tool_result` — have fields. Everything
+else (thinking, redacted_thinking, server tool blocks, compaction, anything a future API version
+adds) is an `OpaqueBlock` with `extra="allow"`, carried through untouched. `adapters/llm/`
+translates in both directions.
+
+**Why.** Two forces pull opposite ways and this resolves both.
+
+The SDK's advice is correct for an application that calls the model. It is wrong here: `core/`
+importing `anthropic` means the unit suite depends on the provider SDK, `FakeLLM` has to
+construct real SDK objects to stand in, and the boundary that CLAUDE.md §5 exists to protect —
+the one an interviewer asks about first — is gone.
+
+But the naive form of "define your own types" is worse than either option. Parsing a thinking
+block into our own fields and re-serialising it is *precisely* how the byte-identical round trip
+in CLAUDE.md §8 breaks, and it breaks silently, taking the prompt cache with it — one bug, two
+symptoms, neither of which raises. Typing only what we interpret means the blocks we must not
+mangle have no parsing step to be mangled by. It also makes replay forward-compatible: a block
+type introduced after this code was written round-trips unharmed, which is the same
+ignore-what-you-do-not-understand rule `plan.md` §2.3 already applies to SSE events.
+
+**Rejected.** SDK types in `core/` (couples the loop to a vendor and puts the provider SDK in the
+unit suite's dependency set). Fully typed models for every block type (every new block type
+becomes a breaking change, and thinking blocks get mangled — the worst of both). Everything as
+`dict[str, Any]` (no typing where the loop genuinely needs it; tool dispatch degrades to
+string-keyed lookups over unvalidated data).
+
+**Give up.** A translation layer in the adapter, and tests that have to keep pace with the real
+wire shape. Mitigated by the opt-in live smoke test (v0.8), which asserts the translation against
+an actual response rather than our memory of one.
+
+**Revisit if** the translation layer passes roughly 100 lines — that would mean we are
+re-implementing the SDK rather than adapting it.
+
+---
+
+## D-015 — Ports land with the phase that implements them · 2026-09-19 · ACCEPTED
+
+**Context.** CLAUDE.md §5 lists seven Protocols in `core/ports.py`: `LLMClient`, `Retriever`,
+`Reranker`, `RunStore`, `EventBus`, `TaskQueue`, `Clock`. The natural reading is to write all
+seven up front, since ports are supposed to come before implementations.
+
+**Decision.** Write each port in the phase that first implements it. v0 ships `Clock` and
+`LLMClient`. `RunStore` arrives in v1 alongside the tables, `EventBus` in v2, `Retriever` and
+`Reranker` in v3.
+
+**Why.** "Port before implementation" means before the *adapter*, not eight weeks before anyone
+knows what the thing does. `RunStore`'s signature depends on the step and message tables that
+task 1.1 defines; guessing it now produces an interface that is subtly wrong and — worse —
+written down, so the v1 adapter gets built to match the guess instead of the requirement. An
+absent port is a known gap; a wrong port is a silent one.
+
+**Rejected.** All seven now (speculative design, and the file reads as architecture theatre).
+No ports file until several adapters exist (loses the ordering that makes dependency inversion
+real rather than retrofitted).
+
+**Revisit** never as a principle, but note the failure mode it trades for: two ports that should
+have shared a shape are designed independently. The check is a read of `ports.py` as a whole at
+the start of each phase.

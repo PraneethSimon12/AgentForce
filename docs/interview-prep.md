@@ -218,6 +218,51 @@ is harmless and reversible. Dependency checks belong in `/readyz` for exactly th
 
 ---
 
+## v0.2 — ports and the message vocabulary · 2026-09-19
+
+---
+
+### Q13 — The Anthropic SDK ships exact types for messages and content blocks, and its docs say not to redefine them. You did anyway. Defend that.
+
+The advice is right for an application that calls the model, and wrong for this one, because of
+where the types would land. `core/` holds the agent loop, and `core/` importing `anthropic` means
+the unit suite depends on the provider SDK, `FakeLLM` has to construct real SDK objects to stand
+in for responses, and the boundary that makes the loop testable with no network stops being a
+boundary. The loop is the product here; it does not get to be coupled to a vendor.
+
+What I would *not* defend is the naive version of owning the types — modelling every block with
+fields. Thinking blocks have to be echoed back unchanged, so parsing one into my own fields and
+re-serialising it is the exact mechanism by which the round trip breaks. So I only give fields to
+the three block kinds the loop interprets: text, tool_use, tool_result. Everything else is opaque
+and carried through untouched.
+
+The cost is a translation layer in the adapter, and I keep it honest with an opt-in live test
+that checks the translation against a real response rather than my memory of the wire format.
+(D-014.)
+
+---
+
+### Q14 — Thinking blocks stay opaque while text and tool_use get real fields. What bug does that prevent, and why would it be hard to find?
+
+It prevents mangling a block on the way back out, and the reason it is hard to find is that
+nothing raises.
+
+Continuing a turn on the same model requires the thinking blocks to come back unchanged. If I
+parse one into a typed model and re-serialise it, anything I get slightly wrong — a dropped
+`signature`, a re-ordered key, a field I did not know about — produces a request that is still
+syntactically valid. The model does not reject it. It just behaves worse.
+
+And the same bug has a second symptom in a different system: the conversation prefix is the
+prompt cache key, so a block that does not reproduce byte-identically also stops the cache
+matching, and I find out on the bill rather than in a traceback. One bug, two silent failures, no
+exception anywhere.
+
+A block with no parsing step has nothing to get wrong. The check that it is working is
+`usage.cache_read_input_tokens` — zero across repeated runs means something is invalidating the
+prefix. (CLAUDE.md 8, D-014.)
+
+---
+
 ## Questions I still owe answers to
 
 Open, to be answered as the phases land. Written down now so they are not quietly avoided.
