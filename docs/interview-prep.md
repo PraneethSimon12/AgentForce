@@ -351,6 +351,57 @@ answer "does replay return the same value?" Only one of those questions is about
 
 ---
 
+## v0.8 — the real adapter · 2026-09-19
+
+---
+
+### Q19 — You carry unknown content blocks through untouched but fail on an unknown stop_reason. Why not treat them the same way?
+
+Because they are opposite risks, so being consistent would be the wrong goal.
+
+A block type I do not recognise is one I never act on — I only replay it — and replaying it
+unchanged is exactly the correct behaviour. Failing on it would turn a new block type in a future
+API version into an outage, for a value that was never going to be read anyway.
+
+A `stop_reason` is the single field the loop branches on. Refusal handling, truncation handling,
+"is this an answer or a tool call" — all of it hangs off that one value. If a new terminal
+condition fell silently into the `end_turn` branch, the run would return a partial response as a
+finished answer, confidently, with no error anywhere. That is the worst failure available: wrong,
+silent, and delivered as success.
+
+So the rule is: liberal in what you carry, strict in what you branch on. Failing loudly means the
+new value gets added to the literal by someone who has decided what the loop should do about it.
+(D-019.)
+
+---
+
+### Q20 — What actually forced the adapter to exist, rather than just calling the SDK from the loop?
+
+Four things live in the adapter and none of them belong in the loop.
+
+**Which model.** The client is bound to one model at construction, so the eval harness's cheap
+judge is a second client rather than a parameter threaded through the loop.
+
+**Prompt caching.** `core` hands over a plain system string; the `cache_control` breakpoint is
+attached in the adapter, on the system block — which covers the tool schemas too, because render
+order is tools, then system, then messages, and a breakpoint caches everything up to and
+including its own block. Caching is a property of the transport, not of the conversation.
+
+**The retryable/non-retryable split.** The adapter maps `RateLimitError`, `APIConnectionError`
+and a 5xx `APIStatusError` to `LLMTransportError`, and everything else to `LLMRequestError`. That
+is what lets the loop implement a retry budget without importing `anthropic` and without knowing
+`RateLimitError` exists. Collapsing them into one broad catch would erase the only distinction
+that justifies catching at all.
+
+**Translation.** Our own message types to the SDK's and back (D-014).
+
+The test of whether the boundary is real is the v0 exit criterion: the same `AgentLoop` object
+completes a run against the real API with one line changed — `FakeLLM` becomes
+`AnthropicClient`. If that swap had needed a single edit inside `core/`, the boundary would be
+decorative.
+
+---
+
 ## Questions I still owe answers to
 
 Open, to be answered as the phases land. Written down now so they are not quietly avoided.

@@ -503,3 +503,36 @@ quietly added to a shared context.
 **Revisit if** a tool genuinely needs per-invocation runtime state rather than per-registration
 dependencies, which is the one case a closure cannot express.
 
+---
+
+## D-019 — Unknown block types pass through; an unknown stop_reason does not · 2026-09-19 · ACCEPTED
+
+**Context.** The adapter meets two kinds of value it does not recognise: a content block
+of a type we have never seen, and a `stop_reason` we have never seen. The consistent-looking
+answer is to treat both the same way.
+
+**Decision.** Unknown **blocks** are carried through verbatim as `OpaqueBlock`. An unknown
+**stop reason** raises `LLMRequestError` and fails the run.
+
+**Why.** They are opposite risks, so consistency would be the wrong goal.
+
+A block we do not understand is one we do not act on — we only replay it, and replaying it
+unchanged is exactly right. Failing on it would mean a new block type in a future API version
+breaks every run, for a value that was never going to be read.
+
+A `stop_reason` is the one field the loop branches on. Every safety property in the loop —
+refusal handling, truncation handling, "is this an answer or a tool call" — hangs off it. A new
+terminal condition silently falling into the `end_turn` branch would be treated as a finished
+answer, which is a wrong result delivered confidently and with no error anywhere. Failing loudly
+means someone adds the value to the `StopReason` literal *deliberately*, having decided what the
+loop should do about it.
+
+The general principle: be liberal in what you carry, strict in what you branch on.
+
+**Rejected.** Fail on both (a future block type becomes an outage for no benefit). Pass through
+both, defaulting an unknown stop reason to `end_turn` (silently converts a new terminal condition
+into a confidently wrong answer — the worst available failure).
+
+**Revisit** never as a principle. The literal itself is expected to change as the API grows, and
+changing it is the point.
+

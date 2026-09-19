@@ -35,13 +35,27 @@ match reality — resolve before sending**
 
 | # | Claim | Evidence required | Phase | Status |
 | --- | --- | --- | --- | --- |
-| 1.1 | "async agent runtime in FastAPI" | The service runs; async throughout the request path | v0 | ⬜ |
-| 1.2 | "multi-step tool-calling (ReAct) loops" | A run with ≥2 tool calls before answering, step trail visible | v0 | ⬜ |
+| 1.1 | "async agent runtime in FastAPI" | The service runs; async throughout the request path | v0 | 🟨 |
+| 1.2 | "multi-step tool-calling (ReAct) loops" | A run with ≥2 tool calls before answering, step trail visible | v0 | 🟨 |
 | 1.3 | "typed tool registry" | `ToolSpec` + registry; a tool cannot be registered untyped | v0 | ✅ |
 | 1.4 | "Pydantic models auto-generate the JSON schemas sent to the LLM" | `model_json_schema()` output is what lands in the `tools` param — show the request | v0 | 🟨 |
 | 1.5 | "per-step timeouts" | A test where a slow tool trips the timeout and the run survives | v1 | ⬜ |
 | 1.6 | "bounded retries" | `run_steps.attempt` incrementing; a test proving the bound holds | v1 | ⬜ |
 | 1.7 | "token streaming over SSE" | Tokens arrive incrementally; **TTFT p95 recorded** | v2 | ⬜ |
+
+**Status after v0.8 (adapter written, never run).** The `AnthropicClient` exists, is unit-tested
+against stubbed SDK objects, and the live smoke test in `tests/integration/` is written — **and
+has not been executed, because no API key has been used yet.** Until it runs green:
+
+- **1.1 is 🟨.** The runtime is async end to end and the service starts, but nothing drives a run
+  over HTTP yet; `POST /v1/runs` arrives in v1.
+- **1.2 is 🟨.** Multi-step tool calling, parallel tool calls and the full step trail are proven
+  against `FakeLLM` with 122 unit tests. They are not yet proven against the real API.
+- **1.4 stays 🟨** for the same reason: the schema is generated and the request is built, but no
+  real request carrying it has been sent.
+
+Running `pytest -m integration` with a key is what moves all three. Nothing here is allowed to
+reach ✅ on the strength of a test that has only ever been skipped.
 
 **1.3 is ✅ as of v0.3.** `ToolSpec` is generic in its input model, `effect_class` is a required
 field with no default, and an illegal tool name or an empty description is rejected at definition

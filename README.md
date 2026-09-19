@@ -31,13 +31,13 @@ GET  /v1/runs/{id}/events ──► SSE       tokens, tool calls, citations, liv
 
 ## Status
 
-**Pre-v0 — design complete, implementation not started.** The documents are ahead of the code on
+**v0 — the loop runs.** 122 unit tests, green with no network, no database and no model weights. The documents are ahead of the code on
 purpose; writing the design first is how the `ts_rank`-is-not-BM25 problem was caught before it
 reached a resume bullet (`docs/decisions.md` D-007).
 
 | Phase | Scope | State |
 | --- | --- | --- |
-| v0 | The loop, in memory, against a scripted fake LLM | ⬜ |
+| v0 | The loop, in memory, against a scripted fake LLM | 🟨 code complete, live smoke test not yet run |
 | v1 | Durability: checkpoints, leases, idempotency ledger, Celery | ⬜ |
 | v2 | Streaming: Redis Streams, SSE with replay, metrics | ⬜ |
 | v3 | Retrieval: ingestion, dense → lexical → RRF → rerank, each measured | ⬜ |
