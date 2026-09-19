@@ -310,3 +310,35 @@ solo project).
 
 **Revisit** never. If this is being reopened, it is procrastination wearing an architecture
 costume.
+
+---
+
+## D-013 — Settings by injection, not a module-level singleton · 2026-09-19 · ACCEPTED
+
+**Context.** Every module needs configuration, and the obvious Python idiom is
+`settings = Settings()` at module scope in `settings.py`, imported from everywhere.
+
+**Decision.** `Settings` is a **frozen** pydantic-settings model. Process entry points call
+`get_settings()`, cached with `lru_cache(maxsize=1)`. `create_app()` takes an optional `Settings`
+and stores it on `app.state`; handlers read `request.app.state.settings`. Tests construct
+`Settings(_env_file=None, ...)` directly and never call `get_settings()`.
+
+**Why.** A module-level singleton is built at *import* time, so importing any module that touches
+config requires a valid environment — a missing variable becomes an `ImportError` during pytest
+collection instead of a clear error where it is used. It also makes per-test configuration
+impossible without monkeypatching a module global, which then leaks between tests. The factory
+plus a frozen model lets the unit suite vary configuration with no environment at all, which is
+precisely what the v0 exit criterion ("green with no network, no Docker") demands. Frozen, because
+configuration that can mutate at runtime cannot be reconstructed from a log line afterwards.
+
+**Rejected.** Module-level singleton (import-time environment dependency; untestable).
+`Depends(get_settings)` on every route (works for HTTP, but the cache is still a global that tests
+must override via `dependency_overrides`, and it does nothing for the Celery workers, which are
+not FastAPI). Passing individual values instead of the object (every new setting rewrites every
+signature in the call chain).
+
+**Give up.** Two ways to reach configuration. The rule that keeps it honest: **only entry points
+call `get_settings()`**; everything downstream receives a `Settings` it was given.
+
+**Revisit if** per-tenant or per-run configuration overrides appear — a process-wide singleton
+would then be wrong in a second, worse way.

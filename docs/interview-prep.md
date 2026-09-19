@@ -184,6 +184,40 @@ storage to the requirement instead of storing everything the same way is the who
 
 ---
 
+## v0.1 — settings, app factory, `/healthz` · 2026-09-19
+
+---
+
+### Q11 — `max_steps` carries `le=50` in the settings model. The loop already enforces the step cap, so what does a bound on the *config* protect against?
+
+Against the configuration itself being wrong. The loop enforces the limit against whatever value
+it was handed — its job is to obey the config, not to audit it. So a typo in `.env` that writes
+`120` instead of `12` survives any amount of loop enforcement, and the first symptom is the bill.
+
+`le=50` turns that silent 10x cost increase into a startup failure, which is the right failure: it
+is loud, it happens before a single token is spent, and it is attributable to the deploy that
+caused it. The general principle is that a guardrail which can itself be misconfigured is not a
+guardrail — the enforcement and the bound on the enforcement are two separate protections, and the
+cheap one belongs in the type. (CLAUDE.md 7.)
+
+---
+
+### Q12 — `/healthz` deliberately performs no IO. Why is a health check that pings Postgres actively harmful rather than merely wasteful?
+
+Because something *acts* on the answer. If liveness fails while Postgres has a bad minute, the
+orchestrator restarts the API containers — all of them, simultaneously, because they all share
+that dependency. The restarts discard warm connection pools and every in-flight request, and the
+reconnect storm makes the database outage worse. One dependency blip becomes a full application
+outage, caused entirely by the probe.
+
+The distinction is what the remedy is. Liveness asks "is this process wedged?", and the only
+remedy for yes is a restart — so it must fail only for conditions a restart actually fixes.
+Readiness asks "should traffic be routed here?", and its remedy is to stop routing traffic, which
+is harmless and reversible. Dependency checks belong in `/readyz` for exactly that reason.
+(plan.md 2.6.)
+
+---
+
 ## Questions I still owe answers to
 
 Open, to be answered as the phases land. Written down now so they are not quietly avoided.

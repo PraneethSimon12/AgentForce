@@ -8,6 +8,10 @@
 #   llama-index   -> same, for the RAG half
 #   sse-starlette -> the SSE framing is ~30 lines and we want to own the replay logic
 
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "agentforge"
 version = "0.1.0"
@@ -54,6 +58,12 @@ dev = [
   "ruff>=0.7",
   "mypy>=1.13",
 ]
+
+# Without this, setuptools' flat-layout auto-discovery sees app/, tests/, evals/ and
+# alembic/ as four candidate packages and refuses to guess, so `pip install -e .`
+# fails in the Dockerfile. Only `app` is the distribution.
+[tool.setuptools.packages.find]
+include = ["app*"]
 
 [tool.ruff]
 line-length = 100
