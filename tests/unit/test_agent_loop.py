@@ -44,6 +44,25 @@ SYSTEM = "You are a test agent."
 OWNER = "test-worker"
 
 
+class RecordingClock:
+    """
+    A `Clock` that never actually sleeps and remembers what it was asked to wait.
+
+    This is what the Clock port was defined for in v0.2 and the first place it pays: the
+    retry tests assert the exact backoff schedule in microseconds instead of taking
+    several real seconds and being flaky about it.
+    """
+
+    def __init__(self) -> None:
+        self.slept: list[float] = []
+
+    def now(self) -> datetime:
+        return datetime(2026, 9, 19, tzinfo=UTC)
+
+    async def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+
+
 @dataclass
 class Harness:
     """
@@ -57,6 +76,7 @@ class Harness:
     loop: AgentLoop
     store: InMemoryRunStore
     ledger: InMemoryToolLedger
+    clock: RecordingClock
     limits: RunLimits
     run_id: uuid.UUID | None = None
 
@@ -92,14 +112,21 @@ def build_loop(
         registry.register(clock_tool(FrozenClock(datetime(2026, 9, 19, tzinfo=UTC))))
     store = store or InMemoryRunStore()
     ledger = ledger or InMemoryToolLedger()
+    clock = RecordingClock()
     loop = AgentLoop(
         llm=llm,
         registry=registry,
         store=store,
         ledger=ledger,
+        clock=clock,
         load_prompt=lambda _name, _version: SYSTEM,
+        # Fixed jitter draw: the delay schedule is then exactly predictable.
+        rng=lambda: 1.0,
     )
-    return Harness(loop=loop, store=store, ledger=ledger, limits=limits or RunLimits()), llm
+    return (
+        Harness(loop=loop, store=store, ledger=ledger, clock=clock, limits=limits or RunLimits()),
+        llm,
+    )
 
 
 # --- The happy path ------------------------------------------------------------------
@@ -467,18 +494,43 @@ async def test_the_script_running_out_is_a_loud_failure() -> None:
         await loop.run("Add.")
 
 
-async def test_a_transport_error_from_the_provider_propagates() -> None:
+async def test_a_transport_error_is_retried_then_pauses_the_run() -> None:
     """
-    v0 has no retry — that is v1, task 1.8, and it is bounded at two levels (D-009).
+    A provider outage is not a permanent failure, so it does not kill the run.
 
-    Asserted so the absence is deliberate and visible rather than assumed.
+    The step is retried up to its bound, and when those run out the run is left PAUSED
+    and resumable rather than FAILED. Marking it terminal would mean a five-minute
+    upstream blip destroying every run in flight (D-009).
     """
     from app.core.runtime.errors import LLMTransportError
 
-    loop, _ = build_loop([LLMTransportError("connection reset")])
+    loop, llm = build_loop(
+        [LLMTransportError("connection reset")] * 3,
+        limits=RunLimits(max_step_attempts=3),
+    )
 
-    with pytest.raises(LLMTransportError):
-        await loop.run("Add.")
+    outcome = await loop.run("Add.")
+
+    assert outcome.status is RunStatus.PAUSED
+    assert outcome.error_code is ErrorCode.STEP_FAILED
+    assert len(llm.calls) == 3  # the bound was respected exactly
+
+
+async def test_backoff_grows_and_is_jittered() -> None:
+    """
+    Full jitter, asserted exactly because the random draw is injected.
+
+    A fixed exponential would have a hundred rate-limited runs retrying in lockstep and
+    re-triggering the limit together — the delay would move the stampede, not break it.
+    With `rng` pinned to 1.0 the schedule is the upper edge of each window.
+    """
+    from app.core.runtime.errors import LLMTransportError
+
+    loop, _ = build_loop([LLMTransportError("boom")] * 4, limits=RunLimits(max_step_attempts=4))
+
+    await loop.run("Add.")
+
+    assert loop.clock.slept == [0.5, 1.0, 2.0]
 
 
 async def test_the_full_conversation_is_returned_for_replay() -> None:

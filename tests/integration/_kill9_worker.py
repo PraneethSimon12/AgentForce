@@ -29,6 +29,7 @@ import sys
 import uuid
 from collections.abc import Sequence
 
+from app.adapters.clock import SystemClock
 from app.adapters.db.run_store import PostgresRunStore
 from app.adapters.db.session import build_engine, build_session_factory
 from app.adapters.db.tool_ledger import PostgresToolLedger
@@ -83,6 +84,7 @@ async def main() -> None:
         registry=registry,
         store=store_cls(sessions),
         ledger=PostgresToolLedger(sessions),
+        clock=SystemClock(),
         load_prompt=lambda _n, _v: "You are a test agent.",
         # Short, so the parent does not have to wait long for the dead worker's lease to
         # expire before a replacement can take the run over.

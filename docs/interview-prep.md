@@ -585,6 +585,73 @@ that silently verifies a different claim than the one in its name.
 
 ---
 
+## v1.8 — timeouts and retries · 2026-09-19
+
+---
+
+### Q29 — How many layers of retry does one user request actually have?
+
+Three, and the reason I can answer that quickly is that it was the whole point of writing the
+backoff by hand instead of importing `tenacity`.
+
+1. **The SDK.** The Anthropic client retries connection errors, 408, 409, 429 and 5xx twice by
+   default. I left that at its default deliberately and *counted* it rather than disabling it.
+2. **The step.** The loop retries a failed step up to `max_step_attempts`, default 3.
+3. **The run.** A durable counter on the row bounds retries across the whole run, including
+   across crashes and resumes.
+
+Multiply them without noticing and one user action becomes 2 x 3 x 3 = 18 attempts against an
+upstream that is already struggling — which is how a rate limit becomes an outage. The number
+that matters is not "how few layers" but "do you know how many".
+
+The backoff itself is exponential with **full jitter**: the delay is uniform over the whole
+window, not a fixed exponential. A hundred runs rate-limited at the same instant and all backing
+off exactly 0.5s retry in lockstep and re-trigger the limit together — a fixed delay moves the
+stampede rather than breaking it.
+
+---
+
+### Q30 — What happens when a step runs out of retries? Is the run dead?
+
+No, and that distinction is D-022.
+
+**Step retries exhausted → the run is PAUSED and resumable**, and the lease is released. A step
+runs out of attempts because something upstream was unavailable at that moment. Treating that as
+terminal means a five-minute provider blip permanently destroys every run in flight, and every
+committed step is thrown away with it.
+
+**Run retries exhausted → FAILED, terminally.** A run only reaches that bound by failing
+repeatedly across steps and across processes, which is durable evidence that something is
+actually wrong rather than momentarily unavailable.
+
+That split is also what gives the durable counter a job. If step exhaustion were terminal the run
+counter would never be read twice — it is only meaningful because a paused run can come back, and
+must not come back with a fresh allowance.
+
+The related setting to watch is the lease TTL: it has to exceed the per-step timeout, or a step
+that is legitimately running to its full budget loses its lease while still working. Those two
+numbers are coupled and neither should be tuned alone.
+
+---
+
+### Q31 — Why is the timeout around the whole step rather than around the model call?
+
+Because "this step took too long" is one budget. Two separate timeouts — one for the model, one
+for the tools — would let a step take twice as long as configured while each half stayed inside
+its own limit, which makes the setting mean nothing to whoever set it.
+
+The consequence is that retrying a step re-issues the model call, which costs tokens. That is
+affordable precisely because of the ledger: if the model repeats the same tool call, the recorded
+result is replayed rather than the tool re-executed. If it makes a *different* call, executing it
+is correct, because it is a different action. The retry mechanism and the idempotency mechanism
+compose rather than fight.
+
+What the timeout protects against is specific: a step that hangs holds its lease until the TTL
+expires while the worker waits politely, and the run makes no progress for as long as the
+upstream stays stuck. The timeout converts that into a bounded, retried, eventually-paused run.
+
+---
+
 ## Questions I still owe answers to
 
 Open, to be answered as the phases land. Written down now so they are not quietly avoided.

@@ -34,6 +34,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.adapters.clock import SystemClock
 from app.adapters.db.run_store import PostgresRunStore
 from app.adapters.db.tool_ledger import PostgresToolLedger
 from app.adapters.llm.fake_llm import FakeLLM, calls_tool, says
@@ -73,6 +74,20 @@ async def wait_until(engine: AsyncEngine, sql: str, params: dict[str, object]) -
                 return
         await asyncio.sleep(POLL_INTERVAL)
     raise AssertionError(f"Condition never became true within {POLL_TIMEOUT}s: {sql}")
+
+
+def worker_died_because(worker: subprocess.Popen[bytes]) -> str:
+    """
+    The worker's stderr, for when it never reached the state we were waiting for.
+
+    Without this, a worker that fails at import time looks identical to one that is
+    merely slow: the test times out with no clue why. Diagnosing that by hand once is
+    enough.
+    """
+    if worker.poll() is None:
+        return "(worker still running)"
+    _, err = worker.communicate(timeout=5)
+    return err.decode(errors="replace")[-2000:]
 
 
 async def counts(engine: AsyncEngine, run_id: uuid.UUID) -> tuple[int, int, int]:
@@ -138,6 +153,7 @@ async def finish_the_run(sessions: async_sessionmaker[AsyncSession], run_id: uui
         registry=registry,
         store=PostgresRunStore(sessions),
         ledger=PostgresToolLedger(sessions),
+        clock=SystemClock(),
         load_prompt=lambda _n, _v: "You are a test agent.",
         lease_ttl_seconds=30,
     )
@@ -169,6 +185,8 @@ async def test_killed_between_the_ledger_and_the_commit_the_tool_never_runs_twic
             {"r": run_id},
         )
         worker.kill()
+    except AssertionError as exc:  # pragma: no cover - only on a broken worker
+        raise AssertionError(f"{exc}\nworker stderr:\n{worker_died_because(worker)}") from exc
     finally:
         worker.wait(timeout=10)
 
@@ -217,6 +235,8 @@ async def test_killed_mid_tool_the_effect_still_happens_exactly_once(
             {"r": run_id},
         )
         worker.kill()
+    except AssertionError as exc:  # pragma: no cover - only on a broken worker
+        raise AssertionError(f"{exc}\nworker stderr:\n{worker_died_because(worker)}") from exc
     finally:
         worker.wait(timeout=10)
 
@@ -273,6 +293,8 @@ async def test_a_replacement_cannot_take_over_while_the_lease_is_still_live(
         # The process is gone, but its lease has not expired yet.
         with pytest.raises(RunNotResumable):
             await finish_the_run(session_factory, run_id)
+    except AssertionError as exc:  # pragma: no cover - only on a broken worker
+        raise AssertionError(f"{exc}\nworker stderr:\n{worker_died_because(worker)}") from exc
     finally:
         worker.wait(timeout=10)
 

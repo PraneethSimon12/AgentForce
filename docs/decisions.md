@@ -612,3 +612,41 @@ and it is precisely the state a resume reads in order to avoid re-execution — 
 mean the result is itself the side effect — at which point it belongs in our database and in the
 step transaction.
 
+---
+
+## D-022 — Exhausting a step's retries pauses the run; exhausting the run's ends it · 2026-09-19 · ACCEPTED
+
+**Context.** D-009 fixed two retry bounds — per step and per run — but not what happens when
+either is reached. The obvious answer is that both fail the run.
+
+**Decision.** Per-step exhaustion leaves the run **PAUSED** and resumable, releasing the lease.
+Per-run exhaustion fails it terminally with `STEP_FAILED`.
+
+**Why.** The two bounds are reached for different reasons and only one of them says anything
+durable about the run.
+
+A step runs out of attempts because something upstream was unavailable *just then* — a rate
+limit, a 503, a timeout. Marking that terminal means a five-minute provider blip permanently
+destroys every run in flight, and a user who asked a question at the wrong moment gets nothing
+back with no way to recover it. Pausing costs nothing and preserves every committed step.
+
+A run runs out of retries because it has been failing repeatedly across steps and across
+processes. That is durable evidence that something is actually wrong, and continuing to retry
+spends money to keep discovering it.
+
+This also gives the durable per-run counter a job it could not otherwise have. If step
+exhaustion were terminal, the run counter would never be consulted twice; it is only meaningful
+because a paused run can come back and must not arrive with a fresh allowance.
+
+**Rejected.** Both terminal (a transient outage kills everything in flight). Both pausing (the
+run counter then bounds nothing, and an automatic resumer would retry forever). Distinguishing by
+exception type rather than by which bound was hit (the same 503 should pause early in a run and
+fail late in one, and only the counter knows the difference).
+
+**Give up.** A paused run needs something to resume it — the recovery scan, or an operator. Until
+`POST /runs/{id}/resume` and the scan loop exist, a paused run sits still. That is the honest
+state and it is visible in `runs.status`.
+
+**Revisit if** we see runs pausing and resuming in a loop without progressing, which would mean
+the run-level bound is too high rather than that the split is wrong.
+

@@ -121,6 +121,7 @@ class PostgresRunStore:
                         input_tokens=step.usage.input_tokens,
                         output_tokens=step.usage.output_tokens,
                         cache_read_tokens=step.usage.cache_read_input_tokens,
+                        attempt=step.attempt,
                         tool_calls=[_tool_call_to_wire(c) for c in step.tool_calls],
                     )
                 )
@@ -162,6 +163,27 @@ class PostgresRunStore:
             # query keep finding a run that has nothing left to do.
             run.lease_owner = None
             run.lease_expires_at = None
+
+    async def record_retry(self, run_id: uuid.UUID) -> int:
+        """
+        Increment the run's retry counter atomically and return the new value.
+
+        `retries_used + 1` is computed *in SQL*, not read-then-write. Two workers cannot
+        both hold a live lease on one run, so the race is unlikely — but a counter whose
+        entire job is to bound a crash loop should not depend on that argument holding.
+        """
+        async with transaction(self._sessions) as session:
+            total = (
+                await session.execute(
+                    update(Run)
+                    .where(Run.id == run_id)
+                    .values(retries_used=Run.retries_used + 1)
+                    .returning(Run.retries_used)
+                )
+            ).scalar_one_or_none()
+        if total is None:
+            raise RunNotFound(f"No run with id {run_id}.")
+        return int(total)
 
     # --- Leases ----------------------------------------------------------------------
     #
@@ -372,6 +394,7 @@ def _to_record(run: Run) -> RunRecord:
             output_tokens=run.output_tokens,
             cache_read_tokens=run.cache_read_tokens,
         ),
+        retries_used=run.retries_used,
         messages=tuple(
             Message(
                 role=cast(Any, message.role),
@@ -389,6 +412,7 @@ def _to_record(run: Run) -> RunRecord:
                     cache_read_input_tokens=step.cache_read_tokens,
                 ),
                 tool_calls=tuple(_tool_call_from_wire(c) for c in step.tool_calls),
+                attempt=step.attempt,
             )
             for step in run.steps
         ),

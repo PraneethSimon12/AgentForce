@@ -121,3 +121,37 @@ class StepAlreadyCommitted(StoreError):
 
 class RunNotResumable(StoreError):
     """The run is terminal, or its lease is held and still live. A 409 at the edge."""
+
+
+class StepTimeout(AgentForgeError):
+    """
+    A single step exceeded its time budget.
+
+    Retryable, because the usual cause is a slow upstream rather than a wrong request.
+    Distinct from the *run* having no time left: this bounds one model call plus its
+    tools, which is what stops a single wedged step from holding a lease forever while
+    the worker that owns it waits politely.
+    """
+
+    def __init__(self, step_idx: int, seconds: float) -> None:
+        super().__init__(f"Step {step_idx} exceeded its budget of {seconds}s.")
+        self.step_idx = step_idx
+        self.seconds = seconds
+
+
+class RetriesExhausted(AgentForgeError):
+    """
+    The step failed more times than its budget allows, or the run ran out of retries.
+
+    Two bounds, both reachable (D-009). The per-step one catches a step that cannot
+    succeed; the per-run one catches a run that keeps almost-succeeding and would
+    otherwise retry forever at a slow burn.
+    """
+
+    def __init__(
+        self, message: str, *, last_error: str, run_budget_exhausted: bool = False
+    ) -> None:
+        super().__init__(message)
+        self.last_error = last_error
+        self.run_budget_exhausted = run_budget_exhausted
+        """Which bound was hit. The step bound pauses the run; the run bound ends it."""

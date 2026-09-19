@@ -17,6 +17,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import BaseModel
@@ -43,6 +44,25 @@ from app.core.tools.registry import ToolRegistry
 
 SYSTEM = "You are a test agent."
 OWNER = "worker-1"
+
+
+class RecordingClock:
+    """
+    A `Clock` that never actually sleeps and remembers what it was asked to wait.
+
+    This is what the Clock port was defined for in v0.2 and the first place it pays: the
+    retry tests assert the exact backoff schedule in microseconds instead of taking
+    several real seconds and being flaky about it.
+    """
+
+    def __init__(self) -> None:
+        self.slept: list[float] = []
+
+    def now(self) -> datetime:
+        return datetime(2026, 9, 19, tzinfo=UTC)
+
+    async def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
 
 
 class Empty(BaseModel):
@@ -115,7 +135,9 @@ def build(
         registry=registry,
         store=store or InMemoryRunStore(),  # type: ignore[arg-type]
         ledger=ledger or InMemoryToolLedger(),
+        clock=RecordingClock(),
         load_prompt=lambda _n, _v: SYSTEM,
+        rng=lambda: 1.0,
     )
 
 
@@ -123,7 +145,9 @@ async def create_run(store: InMemoryRunStore, **overrides: object) -> uuid.UUID:
     spec: dict[str, object] = {
         "agent": "tester",
         "input": {"query": "do the thing"},
-        "limits": RunLimits(),
+        # One attempt per step, so a scripted transport failure stops the worker
+        # immediately instead of consuming the script on retries.
+        "limits": RunLimits(max_step_attempts=1),
         "effort": "medium",
         "prompt_name": "test",
         "prompt_version": 1,
@@ -156,8 +180,8 @@ async def test_a_resumed_run_continues_from_the_last_committed_step() -> None:
         store=store,
         ledger=ledger,
     )
-    with pytest.raises(LLMTransportError):
-        await first.run(run_id, owner=OWNER)
+    paused = await first.run(run_id, owner=OWNER)
+    assert paused.status is RunStatus.PAUSED  # resumable, not dead
 
     store.expire_lease(run_id)  # the worker is gone; its lease times out
     second = build([says("all done")], tool, store=store, ledger=ledger)
@@ -184,8 +208,7 @@ async def test_the_resumed_conversation_carries_the_committed_history() -> None:
     first = build(
         [calls_tool("side_effect", {}), LLMTransportError("boom")], tool, store=store, ledger=ledger
     )
-    with pytest.raises(LLMTransportError):
-        await first.run(run_id, owner=OWNER)
+    await first.run(run_id, owner=OWNER)
 
     store.expire_lease(run_id)
     llm = FakeLLM(script=[says("done")])
@@ -196,6 +219,7 @@ async def test_the_resumed_conversation_carries_the_committed_history() -> None:
         registry=registry,
         store=store,
         ledger=ledger,
+        clock=RecordingClock(),
         load_prompt=lambda _n, _v: SYSTEM,
     )
     await second.run(run_id, owner="worker-2")
@@ -264,6 +288,7 @@ async def test_the_replayed_result_is_the_one_that_was_recorded() -> None:
         registry=registry,
         store=inner,
         ledger=ledger,
+        clock=RecordingClock(),
         load_prompt=lambda _n, _v: SYSTEM,
     ).run(run_id, owner="worker-2")
 

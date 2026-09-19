@@ -30,6 +30,25 @@ target_metadata = Base.metadata
 config.set_main_option("sqlalchemy.url", get_settings().database_url_sync)
 
 
+def include_object(
+    obj: object, name: str | None, type_: str, reflected: bool, compare_to: object
+) -> bool:
+    """
+    Keep autogenerate to the objects this project actually owns.
+
+    Without this, any table that exists in a developer's database but not in
+    `Base.metadata` is read as a table to *remove* — and the generated migration
+    cheerfully proposes dropping it. That is how a scratch table from an integration
+    test, or another application sharing the database, ends up deleted by a migration
+    nobody thought was destructive.
+
+    `test_` is reserved here for the fixtures the kill-9 test creates at runtime.
+    """
+    if type_ == "table" and name is not None and name.startswith("test_"):
+        return False
+    return True
+
+
 def run_migrations_offline() -> None:
     """Emit SQL to stdout without connecting. Used to review a migration before applying it."""
     context.configure(
@@ -38,6 +57,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -59,6 +79,7 @@ def run_migrations_online() -> None:
             # thing that only surfaces under a specific value at 2am.
             compare_type=True,
             compare_server_default=True,
+            include_object=include_object,
         )
         with context.begin_transaction():
             context.run_migrations()

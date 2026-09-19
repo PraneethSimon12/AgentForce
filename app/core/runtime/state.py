@@ -75,6 +75,15 @@ class ErrorCode(StrEnum):
     TOOL_FAILED = "TOOL_FAILED"
     """A tool raised something that was not a declared, recoverable failure — a bug."""
 
+    STEP_FAILED = "STEP_FAILED"
+    """
+    A step exhausted its retries — repeated timeouts or transport failures.
+
+    Distinct from TOOL_FAILED (a bug in a tool) and from BUDGET_EXCEEDED (the run was
+    allowed to run out of room). This one means the upstream would not cooperate and we
+    stopped paying to find out whether it eventually would.
+    """
+
     NEEDS_REVIEW = "NEEDS_REVIEW"
     """
     An UNSAFE tool was interrupted mid-flight and a human must resolve it.
@@ -102,6 +111,18 @@ class RunLimits:
     max_steps: int = 12
     token_budget: int = 120_000
     max_output_tokens: int = 16_000
+
+    # Bounds one model call plus the tools it asks for. A step that hangs would
+    # otherwise hold its lease until the TTL expires, and the TTL has to be longer than
+    # a legitimate step — so without this bound the two settings fight each other.
+    step_timeout_seconds: float = 60.0
+
+    # Two retry bounds, both reachable (D-009). `max_step_attempts` counts tries at one
+    # step, including the first. `max_run_retries` is the durable backstop: it lives on
+    # the run row, so a process that crashes and resumes does not get a fresh allowance
+    # and a crash loop cannot retry forever.
+    max_step_attempts: int = 3
+    max_run_retries: int = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,11 +174,20 @@ class StepRecord:
     usage: Usage
     tool_calls: tuple[ToolCallRecord, ...] = ()
 
+    # How many tries this step took. Recorded rather than counted in memory, because a
+    # counter in a loop variable vanishes on crash and is invisible in production; a
+    # column can be queried, alerted on, and explained.
+    attempt: int = 1
+
 
 @dataclass(frozen=True, slots=True)
 class RunOutcome:
     """
-    The result of a run, successful or not.
+    Where a run stopped: COMPLETED, FAILED, or PAUSED and resumable.
+
+    PAUSED is not a failure. It means the loop stopped for a reason that may not still
+    be true later — an upstream outage rather than a bad request — and the run can be
+    picked up again without losing a step.
 
     `messages` is the full conversation as it would be replayed — including the raw
     assistant blocks, verbatim. It is here rather than reconstructed from `steps`
@@ -218,6 +248,7 @@ class RunRecord:
     usage: RunUsage
     messages: tuple[Message, ...]
     steps: tuple[StepRecord, ...]
+    retries_used: int = 0
     tenant_id: str = "default"
     parent_run_id: uuid.UUID | None = None
     answer: str | None = None

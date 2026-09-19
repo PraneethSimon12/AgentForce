@@ -172,6 +172,16 @@ class RunStore(Protocol):
         """
         ...
 
+    async def record_retry(self, run_id: uuid.UUID) -> int:
+        """
+        Charge the run one retry and return the new total.
+
+        Durable because a per-step counter is reset by the very crash it is meant to
+        bound. Without a row, a process that dies during backoff and resumes would get a
+        fresh allowance every time, and a crash loop would retry forever (D-009).
+        """
+        ...
+
     async def claim(self, run_id: uuid.UUID, owner: str, ttl_seconds: int) -> RunRecord | None:
         """
         Take the lease on a run, or return None because someone else holds it.

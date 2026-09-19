@@ -115,6 +115,12 @@ class Run(Base):
         Integer, nullable=False, default=0, server_default="0"
     )
 
+    # The durable half of the retry budget (D-009). A per-step counter held in memory
+    # is reset by the very crash it is meant to bound, so the backstop has to be a row.
+    retries_used: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
     # The lease (v1.4). Both columns move together: a worker owns the run only while its
     # name is here *and* the expiry is in the future. An expired lease is the signal that
     # a worker died, which is what makes recovery automatic rather than manual.

@@ -39,8 +39,8 @@ match reality — resolve before sending**
 | 1.2 | "multi-step tool-calling (ReAct) loops" | A run with ≥2 tool calls before answering, step trail visible | v0 | 🟨 |
 | 1.3 | "typed tool registry" | `ToolSpec` + registry; a tool cannot be registered untyped | v0 | ✅ |
 | 1.4 | "Pydantic models auto-generate the JSON schemas sent to the LLM" | `model_json_schema()` output is what lands in the `tools` param — show the request | v0 | 🟨 |
-| 1.5 | "per-step timeouts" | A test where a slow tool trips the timeout and the run survives | v1 | ⬜ |
-| 1.6 | "bounded retries" | `run_steps.attempt` incrementing; a test proving the bound holds | v1 | ⬜ |
+| 1.5 | "per-step timeouts" | A test where a slow tool trips the timeout and the run survives | v1 | ✅ |
+| 1.6 | "bounded retries" | `run_steps.attempt` incrementing; a test proving the bound holds | v1 | ✅ |
 | 1.7 | "token streaming over SSE" | Tokens arrive incrementally; **TTFT p95 recorded** | v2 | ⬜ |
 
 **Status after v0.8 (adapter written, never run).** The `AnthropicClient` exists, is unit-tested

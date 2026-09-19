@@ -130,6 +130,12 @@ class InMemoryRunStore:
             lease_expires_at=None,
         )
 
+    async def record_retry(self, run_id: uuid.UUID) -> int:
+        stored = self._runs[run_id]
+        total = stored.record.retries_used + 1
+        stored.record = _replace(stored.record, retries_used=total)
+        return total
+
     async def claim(self, run_id: uuid.UUID, owner: str, ttl_seconds: int) -> RunRecord | None:
         stored = self._runs.get(run_id)
         if stored is None:
