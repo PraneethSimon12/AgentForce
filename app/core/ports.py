@@ -19,17 +19,19 @@ Not `@runtime_checkable`: that only verifies method *names* exist at runtime, ne
 signatures, so it buys a false sense of safety in exchange for an `isinstance` check we
 do not need. mypy --strict already checks the real thing, before the code runs.
 
-Ports arrive with the phase that implements them. `RunStore` and `EventBus` are not here
-yet because v1 and v2 have not defined what they store and publish — see D-014.
+Ports arrive with the phase that implements them (D-015). `RunStore` landed with v1;
+`EventBus` arrives with v2's streaming, and `Retriever`/`Reranker` with v3.
 """
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
 from app.core.runtime.messages import Effort, LLMResponse, Message, ToolSchema
+from app.core.runtime.state import NewRun, RunOutcome, RunRecord, StepRecord
 
 
 class Clock(Protocol):
@@ -98,5 +100,72 @@ class LLMClient(Protocol):
         Raises:
             LLMTransportError: the call failed in a way that may succeed on retry.
             LLMRequestError: the call failed in a way that will not.
+        """
+        ...
+
+
+class RunStore(Protocol):
+    """
+    Durable run state. Postgres in production, and the reason a crash is survivable.
+
+    The contract that matters is not "save things" — it is **one committed row per
+    completed step, and nothing half-written**. Every method here either fully happens
+    or fully does not, because the thing on the other side of a failure is a different
+    worker trying to work out what already ran.
+
+    Deliberately *not* on this interface: anything per-token. Tokens go to Redis; the
+    database gets one row per step (D-003). Confusing the two turns a two-second answer
+    into a two-hundred-write transaction storm.
+    """
+
+    async def create(self, spec: NewRun) -> RunRecord:
+        """
+        Record a run before it starts, and return it in QUEUED.
+
+        Idempotent on `(tenant_id, idempotency_key)`: replaying a creation with the same
+        key returns the original run rather than starting a second one. That is what
+        makes a client's retry of a timed-out POST safe, and it is enforced by a unique
+        constraint rather than a read-then-write, which would race.
+        """
+        ...
+
+    async def load(self, run_id: uuid.UUID) -> RunRecord:
+        """
+        Load a run with its committed steps and its full conversation, in order.
+
+        Postcondition: the returned `messages` are byte-identical to what was committed
+        — blocks rebuilt through `block_from_dict`, not re-rendered.
+
+        Raises: RunNotFound.
+        """
+        ...
+
+    async def commit_step(
+        self,
+        run_id: uuid.UUID,
+        step: StepRecord,
+        messages: Sequence[Message],
+    ) -> None:
+        """
+        Commit one completed step and the messages it produced, atomically.
+
+        This single method is the durability guarantee. The step row, its messages and
+        the run's usage counters go in **one transaction**: a crash on the next line
+        loses nothing, and a crash during it leaves no partial step behind.
+
+        Preconditions: `step.idx` equals the run's `next_step_idx`.
+        Raises: StepAlreadyCommitted if that index is already present — which is not an
+            error condition so much as the answer to "did I already do this?" after a
+            crash. `UNIQUE(run_id, idx)` is what makes the question answerable at all.
+        """
+        ...
+
+    async def finish(self, run_id: uuid.UUID, outcome: RunOutcome) -> None:
+        """
+        Write the terminal state: status, answer or error, and the completion time.
+
+        Separate from `commit_step` because a run can end without a step succeeding —
+        a budget refusal happens *before* a request is made, so there is no step to
+        attach it to.
         """
         ...

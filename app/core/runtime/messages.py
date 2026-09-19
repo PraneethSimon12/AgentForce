@@ -24,6 +24,7 @@ ignore-what-you-do-not-understand rule that plan.md §2.3 already applies to SSE
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -177,3 +178,43 @@ class ToolSchema(BaseModel):
     name: str
     description: str
     input_schema: dict[str, Any]
+
+
+def block_from_dict(raw: Mapping[str, Any]) -> ContentBlock:
+    """
+    Rebuild one content block from its wire form.
+
+    The single place raw block JSON becomes a typed object, used by the provider adapter
+    when a response arrives and by the run store when a conversation is replayed out of
+    Postgres. Two implementations of this would be two chances to disagree about what a
+    thinking block looks like, and the second one would be found by a resumed run
+    behaving differently from the original — which is the worst place to find it.
+
+    Anything not in the interpreted set becomes an `OpaqueBlock`, so a block type this
+    code has never seen still round-trips (D-014, D-019).
+    """
+    match raw.get("type"):
+        case "text":
+            return TextBlock(text=raw["text"])
+        case "tool_use":
+            return ToolUseBlock(id=raw["id"], name=raw["name"], input=raw["input"])
+        case "tool_result":
+            return ToolResultBlock(
+                tool_use_id=raw["tool_use_id"],
+                content=raw["content"],
+                is_error=bool(raw.get("is_error", False)),
+            )
+        case _:
+            return OpaqueBlock.model_validate(raw)
+
+
+def blocks_to_wire(blocks: Sequence[ContentBlock]) -> list[dict[str, Any]]:
+    """
+    Serialise blocks for storage or transmission.
+
+    `exclude_none=True` because our models carry optional fields that were never in the
+    original payload. Writing `"signature": null` into Postgres and replaying it would
+    change the bytes the model sees, which invalidates the turn and the prompt cache at
+    once, with nothing raised.
+    """
+    return [block.model_dump(exclude_none=True) for block in blocks]

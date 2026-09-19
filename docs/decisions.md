@@ -536,3 +536,34 @@ into a confidently wrong answer — the worst available failure).
 **Revisit** never as a principle. The literal itself is expected to change as the API grows, and
 changing it is the point.
 
+---
+
+## D-020 — Statuses are varchar plus a Python enum, not a native Postgres enum · 2026-09-19 · ACCEPTED
+
+**Context.** `runs.status`, `run_steps.stop_reason` and `runs.error_code` are all closed sets of
+short strings. Postgres has a native `ENUM` type for exactly this, and it gives database-level
+integrity.
+
+**Decision.** Store them as `String(n)`. The closed set lives in the `StrEnum` in
+`core/runtime/state.py`, and the store converts on the way in and out.
+
+**Why.** The values are expected to grow — `NEEDS_REVIEW` arrives with the idempotency ledger,
+new `ErrorCode` values arrive with every failure mode we learn about. Adding a value to a native
+enum is `ALTER TYPE ... ADD VALUE`, which is a migration that takes a lock on the type and cannot
+be rolled back in the same transaction. That turns "we found a new terminal condition" into a
+deployment event.
+
+The integrity we give up is smaller than it looks: nothing writes these columns except the store,
+the store converts through the enum, and the enum is what the code branches on. A native enum
+would be protecting the database from a writer that does not exist.
+
+**Rejected.** Native `ENUM` (migration cost on every new value, for integrity against a writer we
+do not have). A `CHECK` constraint listing the values (same migration cost, less type safety).
+
+**Give up.** A hand-written `INSERT` could store a nonsense status. The mitigation is that
+`RunStatus(run.status)` raises on read, so a bad value is caught at the boundary rather than
+silently branched on.
+
+**Revisit if** something outside this codebase starts writing these tables — a reporting job, a
+second service — at which point the database becomes the only place the constraint can live.
+

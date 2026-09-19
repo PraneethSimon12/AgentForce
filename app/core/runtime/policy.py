@@ -11,10 +11,8 @@ Two limits, checked before every step: a hard step cap and a hard token budget.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from app.core.runtime.errors import AgentForgeError
-from app.core.runtime.state import RunUsage
+from app.core.runtime.state import RunLimits, RunUsage
 
 # Below this many tokens of headroom, a request is not worth making. The reason is not
 # thrift: a request issued with a tiny `max_tokens` gets truncated, and the dangerous
@@ -42,20 +40,6 @@ class BudgetExceeded(AgentForgeError):
         self.limit = limit
         self.observed = observed
         self.step_idx = step_idx
-
-
-@dataclass(frozen=True, slots=True)
-class RunLimits:
-    """
-    The ceilings for one run. Defaults mirror `.env.example`; settings clamp them.
-
-    A client may ask for *less* than the configured ceiling but never more (plan.md
-    §2.2) — otherwise the budget is advisory, which is the same as absent.
-    """
-
-    max_steps: int = 12
-    token_budget: int = 120_000
-    max_output_tokens: int = 16_000
 
 
 class LoopPolicy:

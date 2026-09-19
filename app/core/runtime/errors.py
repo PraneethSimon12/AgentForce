@@ -99,3 +99,25 @@ class ToolExecutionFailed(ToolError):
     model can try something else. An exception that is *not* this type is a bug in the
     tool, and the loop must not paper over it by feeding it back as ordinary output.
     """
+
+
+class StoreError(AgentForgeError):
+    """Something went wrong reaching or reading durable run state."""
+
+
+class RunNotFound(StoreError):
+    """No run with that id. A 404 at the edge (plan.md §2.1)."""
+
+
+class StepAlreadyCommitted(StoreError):
+    """
+    A step index that is already present in the store.
+
+    Raised by the UNIQUE(run_id, idx) constraint, and it is less an error than an
+    answer: after a crash, "this step is already committed" is exactly what a resuming
+    worker needs to be told, and it is the reason the constraint exists.
+    """
+
+
+class RunNotResumable(StoreError):
+    """The run is terminal, or its lease is held and still live. A 409 at the edge."""

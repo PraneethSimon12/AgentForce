@@ -402,6 +402,64 @@ decorative.
 
 ---
 
+## v1.1-1.3 — the durability schema, the store, and replay · 2026-09-19
+
+---
+
+### Q21 — Why are steps and messages two tables rather than one?
+
+Because they answer different questions and have different consumers.
+
+A step is an **accounting record** — what it cost, how many attempts it took, what stopped it. It
+is what the audit trail and the cost dashboard read. A message is **payload** that has to go back
+to the model byte for byte. A resume needs the messages and does not care about the accounting;
+the billing view needs the accounting and must not have to parse conversation blocks to get it.
+
+They also do not map one to one. A single step produces two messages — the assistant turn, then
+the user message carrying all the tool results — and the opening user message belongs to no step
+at all. Forcing them into one table would mean either a nullable half of every row or a message
+column that sometimes holds two messages.
+
+---
+
+### Q22 — `next_step_idx` is `len(self.steps)`. Why not keep a counter column and read that?
+
+Because a counter and the rows it counts are two facts that can disagree, and after a crash you
+cannot tell which one is right.
+
+If the counter is incremented in the same transaction as the step insert then it is redundant —
+it can never say anything the rows do not already say. If it is incremented anywhere else, then
+there is an interleaving where the process dies between the two writes and the run permanently
+believes it is at a step it never committed. Deriving the index from the rows means the rows are
+the single truth, and `UNIQUE(run_id, idx)` is what makes that truth enforceable: a replayed step
+cannot become a second row, it raises.
+
+The same argument applies to the message index, which is counted rather than tracked.
+
+`runs.steps_taken` does exist, but only as a denormalised read convenience for listing runs
+without joining — the resume path never trusts it.
+
+---
+
+### Q23 — What exactly does "byte-identical replay" mean here, and what breaks without it?
+
+It means the conversation loaded out of Postgres serialises to the same JSON the model originally
+sent. Blocks are stored as JSONB exactly as they arrived, and rebuilt through `block_from_dict` —
+the same function the provider adapter uses on a live response, so there is one implementation
+and no second chance to disagree.
+
+Two things break without it, and neither raises. First, a thinking block that comes back altered
+invalidates the turn — the model does not reject it, it just behaves worse. Second, the
+conversation prefix is the prompt-cache key, so a block that does not reproduce exactly stops the
+cache matching and the symptom is the bill rather than a traceback.
+
+The reason it is cheap to get right is D-014: blocks the loop does not interpret are never parsed
+into fields, so there is no rendering step in which to lose a `signature`. The integration test
+asserts the signature survives a real round trip through the database, because that is the field
+whose loss is most silent.
+
+---
+
 ## Questions I still owe answers to
 
 Open, to be answered as the phases land. Written down now so they are not quietly avoided.

@@ -79,6 +79,21 @@ class Settings(BaseSettings):
         default=2, ge=0, le=5, validation_alias="AGENTFORGE_MAX_TOOL_RETRIES"
     )
 
+    # --- Postgres -------------------------------------------------------------
+    # Two URLs, two drivers, on purpose. The API is asyncio and uses asyncpg; Celery
+    # workers are not asyncio and use psycopg (CLAUDE.md §8). Mixing them produces
+    # event-loop errors that look like connection bugs. Defaults point at localhost
+    # because that is where the compose-managed database is reachable from a developer
+    # machine; inside the container network .env overrides the host.
+    database_url: str = Field(
+        default="postgresql+asyncpg://agentforge:agentforge@localhost:5432/agentforge",
+        validation_alias="DATABASE_URL",
+    )
+    database_url_sync: str = Field(
+        default="postgresql+psycopg://agentforge:agentforge@localhost:5432/agentforge",
+        validation_alias="DATABASE_URL_SYNC",
+    )
+
     # --- Observability --------------------------------------------------------
     log_level: LogLevel = Field(default="INFO", validation_alias="LOG_LEVEL")
 
