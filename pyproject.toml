@@ -1,0 +1,79 @@
+# AgentForge — dependency manifest.
+#
+# Rule 5 of CLAUDE.md: no dependency lands here silently. Every entry below carries
+# the reason it earned its place, and what we would have written by hand instead.
+# Things deliberately NOT here (they are learning surface, we hand-roll them):
+#   tenacity      -> retry/backoff is ~40 lines and the semantics matter to us
+#   langchain     -> the orchestration loop IS the project; importing it deletes the project
+#   llama-index   -> same, for the RAG half
+#   sse-starlette -> the SSE framing is ~30 lines and we want to own the replay logic
+
+[project]
+name = "agentforge"
+version = "0.1.0"
+description = "Multi-agent orchestration and RAG runtime"
+requires-python = ">=3.12"
+
+dependencies = [
+  # --- HTTP edge -------------------------------------------------------------
+  "fastapi>=0.115",              # async-native, and Pydantic models ARE the API contract
+  "uvicorn[standard]>=0.32",     # ASGI server; [standard] pulls uvloop + httptools
+  "pydantic>=2.9",               # the spine: request DTOs, tool inputs, JSON Schema generation
+  "pydantic-settings>=2.5",      # typed env parsing, read once in settings.py
+
+  # --- LLM -------------------------------------------------------------------
+  "anthropic>=0.69",             # official SDK; we use messages.stream() + a manual loop (D-002)
+
+  # --- Persistence -----------------------------------------------------------
+  "sqlalchemy[asyncio]>=2.0",    # 2.0 async ORM; the run/step tables are the durability story
+  "asyncpg>=0.30",               # async Postgres driver for the API process
+  "psycopg[binary]>=3.2",        # sync driver for Celery workers (Celery is not asyncio)
+  "alembic>=1.13",               # migrations; the schema changes every phase
+  "pgvector>=0.3",               # SQLAlchemy Vector column type + operators
+
+  # --- Queue / transport -----------------------------------------------------
+  "redis>=5.0",                  # run-event Streams (replayable), idempotency keys, caching
+  "celery>=5.4",                 # durable execution of long-running tools
+
+  # --- Retrieval -------------------------------------------------------------
+  # Heavy (~500MB with torch). Both models are small and CPU-only, and keeping them
+  # local means zero per-query cost and reproducible CI. Behind a port either way,
+  # so swapping to a hosted embedding API is a one-file change.
+  "sentence-transformers>=3.2",  # bi-encoder (embeddings) + cross-encoder (rerank)
+
+  # --- Observability ---------------------------------------------------------
+  "prometheus-client>=0.21",     # multiprocess mode under multiple uvicorn workers
+  "structlog>=24.4",             # JSON logs carrying run_id/step_idx on every line
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "httpx>=0.27",                 # ASGI transport for testing FastAPI without a server
+  "ruff>=0.7",
+  "mypy>=1.13",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]  # ASYNC catches blocking calls in async defs
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+# Third-party libs without stubs. Keep this list SHORT and justified — every entry
+# is a hole in the type coverage.
+[[tool.mypy.overrides]]
+module = ["sentence_transformers.*", "pgvector.*", "celery.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+  "integration: needs real Postgres + Redis (docker compose up). Excluded from the default run.",
+]
+addopts = "-m 'not integration'"

@@ -1,0 +1,75 @@
+# One command brings up the whole runtime: make up
+#
+# Note there is no separate search cluster. Postgres is doing double duty as the
+# lexical index (tsvector/GIN) and the vector index (pgvector/HNSW) — see D-006.
+
+services:
+  postgres:
+    # pgvector ships the extension prebuilt; installing it into stock postgres by hand
+    # is a compile step we gain nothing from.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agentforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentforge}
+      POSTGRES_DB: ${POSTGRES_DB:-agentforge}
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agentforge}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    env_file: [.env]
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      - ./app:/srv/app          # hot reload in dev
+      - hfcache:/root/.cache    # don't re-download model weights on every rebuild
+    # --proxy-headers matters once Caddy/Nginx is in front of the SSE endpoint.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --proxy-headers
+
+  worker:
+    build: .
+    env_file: [.env]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      - ./app:/srv/app
+      - hfcache:/root/.cache
+    # Concurrency 2, not the default (CPU count): each worker can hold a cross-encoder
+    # in memory, and torch already threads internally. Measure before raising it.
+    command: celery -A app.workers.celery_app worker --loglevel=INFO --concurrency=2
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes: ["./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+    profiles: ["observability"]   # opt-in: make up-obs
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+    volumes: ["./monitoring/grafana:/etc/grafana/provisioning:ro"]
+    ports: ["3000:3000"]
+    profiles: ["observability"]
+
+volumes:
+  pgdata:
+  hfcache:

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment — .env holds real keys and is NEVER committed. .env.example is the template.
+.env
+*.env
+!.env.example
+
+# Local model cache (sentence-transformers pulls weights here; hundreds of MB)
+.cache/
+models/
+
+# Eval + load-test artefacts. Reports are committed; raw dumps are not.
+evals/runs/
+loadtest/results/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

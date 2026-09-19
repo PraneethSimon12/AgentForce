@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 5s      # short: we are watching a laptop during a demo, not running a fleet
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: agentforge-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
