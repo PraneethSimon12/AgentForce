@@ -263,6 +263,44 @@ prefix. (CLAUDE.md 8, D-014.)
 
 ---
 
+## v0.3 — the typed tool registry · 2026-09-19
+
+---
+
+### Q15 — Your registry sorts tool schemas by name. Why would the *order* of a list of tool definitions ever matter?
+
+Because it is the front of the prompt-cache prefix. The request renders `tools`, then `system`,
+then `messages`, and caching is a prefix match — a changed byte anywhere invalidates everything
+after it. The tool array is the first thing in that prefix, so its order decides whether any of
+the rest of the request can be a cache hit.
+
+With insertion order, the array depends on import order, which moves silently during a refactor
+and can differ between two processes that built their registries along different code paths. The
+result is workers that never hit each other's cache, on every step of every run. Nothing errors.
+The only symptom is `usage.cache_read_input_tokens` sitting at zero and the bill going up.
+
+Sorting removes the variable. Adding a tool still invalidates the prefix, but that is a real
+change to what the model is told, not an accident. (D-016.)
+
+---
+
+### Q16 — "The Pydantic model is the JSON Schema" — isn't that just saving you from writing a dict by hand?
+
+Writing the dict is the cheap part. What it buys is that there is no *second place* to update.
+
+A hand-written schema plus a hand-written validator are two declarations of the same contract,
+and they drift the first time someone edits one of them. The drift is silent and it fails in the
+worst direction: the model plans against a schema saying one thing, the handler enforces a rule
+saying another, and the symptom is a tool call that cost money to produce and then failed
+validation for a reason the model had no way to anticipate.
+
+Concretely: `precision: int = Field(ge=0, le=10)` is one declaration. It becomes `minimum: 0,
+maximum: 10` in the schema the model plans against, *and* the rule that rejects `precision=99`
+when the model replies. One source, two consumers, no way for them to disagree. That is the
+claim, and the test that proves it asserts both halves from the same spec.
+
+---
+
 ## Questions I still owe answers to
 
 Open, to be answered as the phases land. Written down now so they are not quietly avoided.

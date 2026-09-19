@@ -37,11 +37,21 @@ match reality — resolve before sending**
 | --- | --- | --- | --- | --- |
 | 1.1 | "async agent runtime in FastAPI" | The service runs; async throughout the request path | v0 | ⬜ |
 | 1.2 | "multi-step tool-calling (ReAct) loops" | A run with ≥2 tool calls before answering, step trail visible | v0 | ⬜ |
-| 1.3 | "typed tool registry" | `ToolSpec` + registry; a tool cannot be registered untyped | v0 | ⬜ |
-| 1.4 | "Pydantic models auto-generate the JSON schemas sent to the LLM" | `model_json_schema()` output is what lands in the `tools` param — show the request | v0 | ⬜ |
+| 1.3 | "typed tool registry" | `ToolSpec` + registry; a tool cannot be registered untyped | v0 | ✅ |
+| 1.4 | "Pydantic models auto-generate the JSON schemas sent to the LLM" | `model_json_schema()` output is what lands in the `tools` param — show the request | v0 | 🟨 |
 | 1.5 | "per-step timeouts" | A test where a slow tool trips the timeout and the run survives | v1 | ⬜ |
 | 1.6 | "bounded retries" | `run_steps.attempt` incrementing; a test proving the bound holds | v1 | ⬜ |
 | 1.7 | "token streaming over SSE" | Tokens arrive incrementally; **TTFT p95 recorded** | v2 | ⬜ |
+
+**1.3 is ✅ as of v0.3.** `ToolSpec` is generic in its input model, `effect_class` is a required
+field with no default, and an illegal tool name or an empty description is rejected at definition
+time. `tests/unit/test_tool_registry.py` covers all of it.
+
+**1.4 is 🟨, not ✅, and the distinction is the whole point of this file.** The *generation* half is
+proven: one Pydantic declaration produces both the `minimum`/`maximum` in the schema and the rule
+that rejects an out-of-range value, with a test asserting exactly that. The words "**sent to the
+LLM**" are not yet true — nothing sends a request, because the Anthropic adapter is v0.8. Until a
+real request goes out carrying that schema, the claim is half-earned and stays 🟨.
 
 ### Bullet 2 — durability
 

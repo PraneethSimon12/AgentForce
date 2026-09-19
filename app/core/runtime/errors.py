@@ -40,3 +40,50 @@ class LLMRequestError(LLMError):
     limit. Retrying is not just useless, it is expensive and it hides the real bug, so
     the loop fails the run and records why.
     """
+
+
+class ToolError(AgentForgeError):
+    """Something is wrong with a tool definition, or with a call to one."""
+
+
+class InvalidToolSpec(ToolError):
+    """
+    A tool definition the API would reject.
+
+    Raised while the tool is being defined, which means at import time — the process
+    refuses to start rather than failing on the first call that happens to use it.
+    """
+
+
+class DuplicateToolName(ToolError):
+    """Two tools registered under one name. The second registration is refused."""
+
+
+class ToolNotFound(ToolError):
+    """
+    The model named a tool that is not in the registry.
+
+    Carries the available names so the error message is actionable, and so the loop can
+    hand the model a `tool_result` that tells it what it *could* have called.
+    """
+
+    def __init__(self, name: str, available: tuple[str, ...]) -> None:
+        super().__init__(f"No tool named {name!r}. Registered: {', '.join(available) or '(none)'}")
+        self.name = name
+        self.available = available
+
+
+class ToolInputInvalid(ToolError):
+    """
+    The model's arguments failed the tool's input model.
+
+    `detail` is kept as a separate, compact field rather than only inside the message,
+    because it goes back to the model in a `tool_result` with `is_error=True`. The model
+    then corrects its own call, which turns a validation failure into a recoverable step
+    instead of a failed run — but only if the detail says which field was wrong and why.
+    """
+
+    def __init__(self, tool_name: str, detail: str) -> None:
+        super().__init__(f"Invalid arguments for tool {tool_name!r}: {detail}")
+        self.tool_name = tool_name
+        self.detail = detail

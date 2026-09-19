@@ -410,3 +410,61 @@ real rather than retrofitted).
 **Revisit** never as a principle, but note the failure mode it trades for: two ports that should
 have shared a shape are designed independently. The check is a read of `ports.py` as a whole at
 the start of each phase.
+
+---
+
+## D-016 — Tool schemas are emitted sorted by name · 2026-09-19 · ACCEPTED
+
+**Context.** `ToolRegistry.schemas()` has to return the tools in *some* order. Insertion order is
+the obvious choice and costs nothing to implement.
+
+**Decision.** Sort by name. The same set of tools always produces the same bytes, regardless of
+the order they were registered in.
+
+**Why.** The `tools` array renders ahead of `system` and `messages`, so it sits at the very front
+of the prompt-cache prefix. Caching is a prefix match: change a byte anywhere in the prefix and
+everything after it is invalidated. With insertion order, the array's order depends on import
+order — which changes silently when someone moves a registration during a refactor, or when two
+processes build their registries along different code paths. The result is two workers that never
+hit each other's cache, on every step of every run. Nothing fails; the bill just goes up, and
+CLAUDE.md §7 is the constraint that notices.
+
+Sorting removes the variable entirely. Adding or removing a tool still invalidates the prefix,
+but that is a real change to what the model is being told, not an accident of import order.
+
+**Rejected.** Insertion order (silently non-deterministic across processes). An explicit
+`order` field per tool (a knob to get wrong, for no benefit over alphabetical).
+
+**Give up.** The tool list cannot be ordered to put the most important tool first, if that ever
+turns out to matter for model behaviour. No evidence it does; revisit with a measurement.
+
+**Revisit if** an eval shows tool ordering measurably affects selection quality, in which case
+the order becomes a deliberate, recorded part of the prompt rather than an accident either way.
+
+---
+
+## D-017 — Tools are registered explicitly, not by decorator · 2026-09-19 · ACCEPTED
+
+**Context.** The ergonomic way to define a tool is a decorator over an async function that infers
+the input model from the type hint and self-registers on import — which is roughly what the SDK's
+own `@beta_tool` does.
+
+**Decision.** Construct a `ToolSpec` and call `registry.register(spec)`.
+
+**Why.** Two fields decide how the runtime behaves when a tool is interrupted mid-flight:
+`effect_class` and `execution`. A decorator that infers most of a tool from its signature creates
+pressure to give those a default too, and `effect_class` defaulting to anything is precisely the
+failure D-004 exists to prevent. Explicit construction makes both visible at the definition site.
+
+Self-registration on import is the second problem: it means the tool set depends on which modules
+have been imported, which contradicts D-016's whole purpose and makes a per-agent allowlist (v4)
+fight the framework instead of using it.
+
+**Rejected.** A `@tool` decorator with self-registration (import-order-dependent tool set, and
+pressure toward a default on the one field that must not have one). A decorator that returns a
+`ToolSpec` without registering (defensible, mostly cosmetic — revisit if the definitions get
+noisy).
+
+**Revisit if** tool definitions become repetitive enough that the boilerplate hides the two fields
+that matter, at which point the decorator must still require them positionally.
+
