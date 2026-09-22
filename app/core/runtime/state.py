@@ -93,6 +93,20 @@ class ErrorCode(StrEnum):
     charged someone. Neither is ours to choose silently.
     """
 
+    TOOL_PENDING = "TOOL_PENDING"
+    """
+    A durable tool is still running in a worker when the step's budget ran out (D-023).
+
+    Pauses rather than fails, and it is the one pause that is not a failure at all:
+    nothing went wrong, the tool is simply slower than one step is allowed to wait. A
+    resume finds the result already recorded in the ledger and replays it without
+    executing anything.
+
+    Separate from STEP_FAILED because the operator response is different — this one needs
+    patience, not investigation — and because burning the step's retries on a healthy
+    tool would spend an LLM call per attempt to rediscover that it is still running.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class RunLimits:

@@ -78,7 +78,7 @@ strict = true
 # Third-party libs without stubs. Keep this list SHORT and justified — every entry
 # is a hole in the type coverage.
 [[tool.mypy.overrides]]
-module = ["sentence_transformers.*", "pgvector.*", "celery.*"]
+module = ["sentence_transformers.*", "pgvector.*", "celery.*", "kombu.*", "structlog.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

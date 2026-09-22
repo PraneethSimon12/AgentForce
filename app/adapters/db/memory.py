@@ -27,6 +27,7 @@ from app.core.runtime.errors import RunNotFound, StepAlreadyCommitted
 from app.core.runtime.idempotency import (
     InvocationAction,
     InvocationDecision,
+    InvocationOutcome,
     InvocationStatus,
     resolve_pending,
 )
@@ -214,12 +215,28 @@ class InMemoryToolLedger:
         if existing is None:
             self.rows[key] = _Invocation(status=InvocationStatus.PENDING, effect_class=effect_class)
             return InvocationDecision(action=InvocationAction.EXECUTE)
-        if existing.status is InvocationStatus.PENDING:
-            return InvocationDecision(action=resolve_pending(effect_class))
-        return InvocationDecision(
-            action=InvocationAction.REPLAY,
-            result=existing.result,
-            is_error=existing.is_error,
+
+        # A match rather than an if-chain so that adding a status makes mypy fail here,
+        # the way it did when NEEDS_REVIEW arrived. A fake that silently mishandles a new
+        # state is worse than no fake, because the suite stays green while lying.
+        match existing.status:
+            case InvocationStatus.PENDING:
+                return InvocationDecision(action=resolve_pending(effect_class))
+            case InvocationStatus.NEEDS_REVIEW:
+                return InvocationDecision(action=InvocationAction.NEEDS_REVIEW)
+            case InvocationStatus.SUCCEEDED | InvocationStatus.FAILED:
+                return InvocationDecision(
+                    action=InvocationAction.REPLAY,
+                    result=existing.result,
+                    is_error=existing.is_error,
+                )
+
+    async def lookup(self, key: str) -> InvocationOutcome | None:
+        existing = self.rows.get(key)
+        if existing is None:
+            return None
+        return InvocationOutcome(
+            status=existing.status, result=existing.result, is_error=existing.is_error
         )
 
     async def complete(self, key: str, result: str, *, is_error: bool) -> None:
@@ -228,6 +245,12 @@ class InMemoryToolLedger:
         row.result = result
         row.is_error = is_error
         self.executions.append(key)
+
+    async def needs_review(self, key: str, reason: str) -> None:
+        row = self.rows[key]
+        row.status = InvocationStatus.NEEDS_REVIEW
+        row.result = reason
+        row.is_error = True
 
 
 def _rehydrate(raw: dict[str, Any]) -> ContentBlock:

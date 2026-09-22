@@ -650,3 +650,108 @@ state and it is visible in `runs.status`.
 **Revisit if** we see runs pausing and resuming in a loop without progressing, which would mean
 the run-level bound is too high rather than that the split is wrong.
 
+
+---
+
+## D-023 — A Celery task is one tool invocation, and the ledger is the rendezvous · 2026-09-22 · ACCEPTED
+
+**Context.** `ExecutionMode.DURABLE` has existed on `ToolSpec` since v0.3 with nothing
+consuming it. `architecture.md` §7 described two incompatible designs one sentence apart —
+"the loop code does not branch on this — the registry does" (dispatch is invisible to the loop)
+and "the run moves to `WAITING_TOOL`, and the worker that finishes it hands the run back" (the
+loop stops and something else restarts it). The code could not be written until one won.
+
+**Decision.** The Celery task is **one tool invocation**. The loop keeps the lease and waits.
+
+1. The loop `lookup`s the idempotency key. **No row** → enqueue the task. **A terminal row** →
+   replay it. **A `PENDING` row** → somebody is executing it; wait.
+2. The **task** writes the ledger row, executes, and completes it — the same `begin`/`complete`
+   protocol an inline tool uses, running in a different process.
+3. The loop polls the ledger until the row is terminal or the step's deadline passes. There is no
+   Celery result backend; **the rendezvous is a Postgres row**.
+4. A tool still in flight at the deadline pauses the run with `TOOL_PENDING` instead of burning
+   the step's retries. A later resume finds the result already recorded.
+
+**Why.** Three forces, and this is the only shape that satisfies all of them.
+
+*D-003 says Redis holds nothing we cannot lose.* A Celery result backend is durable run state in
+Redis — a tool result that no longer exists after a `FLUSHALL`. Recording the result in the
+ledger we already have keeps the invariant and costs nothing, because the ledger is *already* the
+thing that must know the outcome to make replay work.
+
+*The hand-back design pays an LLM call for every durable tool call, not just for crashes.* To
+release the lease mid-step you must discard the assistant turn, because a `tool_use` block cannot
+be persisted without its matching `tool_result` — the next request would be malformed. So the
+re-drive re-issues the model call. At our budget (§7) that is a per-call tax on the common path,
+and it is also a correctness risk: the second call may choose a *different* tool, orphaning the
+result the first one is waiting on.
+
+*The broker already guarantees delivery; duplicating that is how you get two of everything.* When
+the loop finds a `PENDING` row it does **not** re-enqueue. `acks_late` plus
+`task_reject_on_worker_lost` is what re-runs a task whose worker died, and the ledger is what
+stops the redelivery becoming a second effect. Each layer does one job.
+
+What DURABLE actually buys, stated precisely: **the tool is not running in the process that can
+die.** An inline tool killed mid-execution leaves the unanswerable t1–t2 window and `effect_class`
+has to resolve it. A durable tool survives its dispatcher — the run comes back and finds the
+answer waiting. The window moves into the Celery task, where at-least-once redelivery reopens it,
+which is why the task runs the same ledger protocol rather than trusting the queue.
+
+**Rejected.** *A task per run* (`DURABLE` would then mean nothing, and a slow tool would have to
+fit inside the step timeout and the lease TTL). *Hand-back via `WAITING_TOOL`* (above; also a
+sixth run status and a second re-entry path that only executes after a crash). *Celery's result
+backend as the rendezvous* (violates D-003). *A second wait budget for durable tools* (Q31 argues
+the step is one budget; splitting it makes the configured number mean nothing).
+
+**Give up.** Polling. The loop queries one indexed row every 100ms–2s while a durable tool runs;
+a ten-minute tool is a few hundred cheap queries. `LISTEN`/`NOTIFY` removes them and is a known
+upgrade, not a rewrite. We also give up the worker slot: the run's driver is blocked for the
+tool's duration, which is fine while a run is sequential and stops being fine when a step
+dispatches several durable tools at once.
+
+There is one narrow duplicate-dispatch window: the loop enqueues, dies before the task inserts its
+row, resumes, sees no row and enqueues again. Two tasks race the unique constraint, one executes
+and one finds `PENDING` — resolved by `effect_class`, conservatively. It is milliseconds wide and
+it fails in the safe direction.
+
+**Revisit if** a step needs to dispatch several durable tools concurrently (the blocked driver
+becomes the bottleneck and the hand-back design starts to earn its cost), or if polling shows up
+in a latency measurement.
+
+---
+
+## D-024 — The Celery worker runs an async engine on its own event loop · 2026-09-22 · ACCEPTED
+
+**Context.** CLAUDE.md §8 says Celery is not asyncio: workers use the sync engine and the sync
+driver. But `ToolLedger` and every tool handler are `async`, and the task needs the ledger.
+
+**Decision.** Each worker **process** creates one event loop and one asyncpg engine in
+`worker_process_init`, and every task body runs on that loop via `run_until_complete`. No sync
+`ToolLedger` is written.
+
+**Why.** The §8 warning is about a specific bug — importing the API's async session into a task,
+where the engine was built in another process (before `fork`) or bound to an event loop that is
+no longer running. Building the engine *inside the forked child*, on a loop that lives as long as
+the process, is not that bug: nothing is inherited across the fork and nothing outlives its loop.
+
+The alternative is a second `ToolLedger` in sync SQLAlchemy. That is a duplicate of the most
+subtle SQL in the project — insert-first-and-let-the-constraint-arbitrate, the `PENDING` read,
+`resolve_pending` — in a file with no integration test of its own, kept in step with the async one
+by hand. `loop.py` already refuses a second implementation of the loop for tests on exactly this
+argument; the ledger deserves the same answer.
+
+One loop per process, not one per task: `asyncio.run` per task would bind a new connection pool to
+a loop that is then destroyed, so every task would pay a fresh TCP connect and the pool would
+never be a pool.
+
+**Rejected.** A sync `ToolLedger` (duplicate semantics, drift). `asyncio.run` per task (no pooling;
+also the engine could not be created once). `--pool=solo` with an outer loop (throws away the
+process isolation that is most of the point of dispatching at all).
+
+**Give up.** `database_url_sync` and `psycopg` now have no consumer. They stay in the manifest
+because a sync-only worker path is still plausible (a CPU-bound reranking task in v3 has no reason
+to be async), and because deleting a setting is a bigger change than leaving one unread. If v3
+lands without using them, they go.
+
+**Revisit if** a task ever needs to run something that blocks the loop for a long time — that
+wants a thread or a separate queue, not a different engine.

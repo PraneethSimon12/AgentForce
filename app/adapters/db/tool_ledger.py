@@ -20,6 +20,7 @@ from app.adapters.db.session import transaction
 from app.core.runtime.idempotency import (
     InvocationAction,
     InvocationDecision,
+    InvocationOutcome,
     InvocationStatus,
     resolve_pending,
 )
@@ -67,6 +68,31 @@ class PostgresToolLedger:
 
         return InvocationDecision(action=InvocationAction.EXECUTE)
 
+    async def lookup(self, key: str) -> InvocationOutcome | None:
+        """
+        Read the row without touching it. What a loop waiting on a Celery worker asks.
+
+        One indexed point lookup on the unique key, in an implicit read-only transaction.
+        This runs on a poll (D-023), so it is written to be the cheapest question the
+        database can be asked — no join, no ordering, no lock, and deliberately no write,
+        because a poll that claimed the invocation would be the duplicate dispatch the
+        whole design is avoiding.
+        """
+        async with self._sessions() as session:
+            row = (
+                await session.execute(
+                    select(ToolInvocation).where(ToolInvocation.idempotency_key == key)
+                )
+            ).scalar_one_or_none()
+
+        if row is None:
+            return None
+        return InvocationOutcome(
+            status=InvocationStatus(row.status),
+            result=row.result,
+            is_error=row.is_error,
+        )
+
     async def complete(self, key: str, result: str, *, is_error: bool) -> None:
         """
         Record the outcome immediately after execution, before the step is committed.
@@ -112,3 +138,28 @@ class PostgresToolLedger:
             case InvocationStatus.PENDING:
                 # The unanswerable window. The tool author already decided.
                 return InvocationDecision(action=resolve_pending(effect_class))
+            case InvocationStatus.NEEDS_REVIEW:
+                # An earlier attempt already resolved this the conservative way. Read
+                # back rather than re-decided, so a second worker cannot reach a
+                # different conclusion about the same row.
+                return InvocationDecision(action=InvocationAction.NEEDS_REVIEW)
+
+    async def needs_review(self, key: str, reason: str) -> None:
+        """
+        Mark an invocation terminal-but-unresolved, without a result.
+
+        Reuses the `result` column for the reason rather than adding one: a row in this
+        state has no result by definition, so the column is free, and the text lands
+        where whoever investigates is already looking.
+        """
+        async with transaction(self._sessions) as session:
+            await session.execute(
+                update(ToolInvocation)
+                .where(ToolInvocation.idempotency_key == key)
+                .values(
+                    status=InvocationStatus.NEEDS_REVIEW.value,
+                    result=reason,
+                    is_error=True,
+                    completed_at=datetime.now(UTC),
+                )
+            )

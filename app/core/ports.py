@@ -20,17 +20,18 @@ signatures, so it buys a false sense of safety in exchange for an `isinstance` c
 do not need. mypy --strict already checks the real thing, before the code runs.
 
 Ports arrive with the phase that implements them (D-015). `RunStore` landed with v1;
-`EventBus` arrives with v2's streaming, and `Retriever`/`Reranker` with v3.
+`TaskQueue` with v1.7's durable tools; `EventBus` arrives with v2's streaming, and
+`Retriever`/`Reranker` with v3.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
-from app.core.runtime.idempotency import InvocationDecision
+from app.core.runtime.idempotency import InvocationDecision, InvocationOutcome
 from app.core.runtime.messages import Effort, LLMResponse, Message, ToolSchema
 from app.core.runtime.state import NewRun, RunOutcome, RunRecord, RunStatus, StepRecord
 from app.core.tools.base import EffectClass
@@ -255,6 +256,34 @@ class ToolLedger(Protocol):
         """
         ...
 
+    async def lookup(self, key: str) -> InvocationOutcome | None:
+        """
+        Read what this invocation's row says, without claiming it. None if there is none.
+
+        The read-only counterpart to `begin`, and the distinction is load-bearing.
+        `begin` *claims*: it commits a PENDING row as part of asking, which is right when
+        the caller is about to execute and wrong when the caller is waiting for someone
+        else to (D-023). A loop polling a durable tool that is running in a Celery worker
+        must be able to ask "has it finished?" without inserting anything and without
+        being told to execute.
+
+        Postcondition: nothing is written. Calling this a thousand times changes nothing.
+        """
+        ...
+
+    async def needs_review(self, key: str, reason: str) -> None:
+        """
+        Close an invocation nobody may run again, because replaying it is unsafe.
+
+        Written by whichever attempt found a PENDING row for an UNSAFE tool. It is the
+        only way a redelivered Celery task can tell the waiting loop "stop" — the two
+        processes share nothing else (D-023), and a loop that kept polling would report
+        a slow tool where the truth is an unresolved one.
+
+        Postcondition: the row is terminal. No further attempt will execute this call.
+        """
+        ...
+
     async def complete(self, key: str, result: str, *, is_error: bool) -> None:
         """
         Record the outcome, in its own transaction, immediately after execution.
@@ -265,5 +294,51 @@ class ToolLedger(Protocol):
         commit would leave that window open and send more crashes down the ambiguous
         PENDING path — including UNSAFE tools, which would then stop for human review
         when they did not need to (D-021).
+        """
+        ...
+
+
+class TaskQueue(Protocol):
+    """
+    Handing work to a process that is not this one. Celery in production (D-023).
+
+    One method, and the narrowness is deliberate. Everything the queue might otherwise
+    be asked to do — track the task, return its result, tell you whether it finished —
+    is already the ledger's job, and a port that offered both would invite a caller to
+    read the result from the wrong one. The queue's entire contract is *delivery*; the
+    ledger's is *what happened*.
+
+    Deliberately not here: a result handle, a task id, a cancel. A task id would be a
+    second identity for something the idempotency key already identifies, and the thing
+    a caller wants to cancel is the run, which it can already do.
+    """
+
+    async def enqueue_tool(
+        self,
+        run_id: uuid.UUID,
+        step_idx: int,
+        tool_name: str,
+        args: Mapping[str, Any],
+        key: str,
+    ) -> None:
+        """
+        Deliver one tool invocation to a worker, at least once.
+
+        `key` is the idempotency key the worker will write to the ledger, computed by the
+        caller rather than the worker so that a duplicate delivery of the same logical
+        call carries the same key. Recomputing it worker-side would work only for as long
+        as the two computations agreed, which is the drift this project keeps designing
+        out.
+
+        At-least-once, explicitly: this may be delivered twice, and a worker that dies
+        mid-task will see it again. The guarantee this port makes is that the task is not
+        silently dropped; making a second delivery harmless is the ledger's job, not
+        this one's.
+
+        Postcondition: the task is durably queued — the broker has accepted it. Returning
+        does NOT mean the tool has run, or started.
+
+        Raises: TaskQueueUnavailable if the broker could not be reached, which is
+            retryable at the step level like any other transport failure.
         """
         ...

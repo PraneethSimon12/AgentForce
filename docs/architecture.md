@@ -135,6 +135,12 @@ steps or tokens is an *expected* outcome of an open-ended loop, and the operator
 the most common real-world ending. It is also the cost guardrail from CLAUDE.md §7, made
 structural.
 
+**Where this diagram is ahead of the code.** `WAITING_TOOL` was removed by D-023 — a durable tool
+no longer changes the run's status, so the state is unreachable by construction. `CANCELLED` and
+`BUDGET_EXCEEDED` are still drawn here as statuses but are implemented as `ErrorCode` values on a
+FAILED run; that divergence predates v1.7 and has not been argued either way yet.
+`core/runtime/state.py` is the source of truth for which statuses exist.
+
 **Progress is monotonic.** `run_steps` is append-only with `UNIQUE(run_id, idx)`; a step is never
 updated in place. Recovery is therefore "read the committed steps, rebuild the message list,
 continue at `max(idx)+1`" — no diffing, no reconciliation, and the table doubles as the audit log
@@ -357,8 +363,16 @@ Three consequences worth stating:
   line to the monthly bill.
 
 `INLINE` vs `DURABLE` is the F4 answer: a fast pure tool runs in the event loop; a slow one is
-dispatched to Celery with its idempotency key, the run moves to `WAITING_TOOL`, and the worker
-that finishes it hands the run back. The loop code does not branch on this — the registry does.
+dispatched to Celery and executed there, while the loop keeps its lease and waits on the ledger
+row the worker will write (**D-023**). The run does *not* change status and is not handed back —
+an earlier draft of this section said it did, and the two halves of that sentence described
+different architectures.
+
+What the mode buys is precise: **the tool is not running in the process that can die.** An inline
+tool killed mid-execution leaves the ambiguous t1–t2 window for `effect_class` to resolve; a
+durable one finishes in its own worker and the resumed run finds the answer already recorded. A
+tool still running when the step's budget expires pauses the run with `TOOL_PENDING`, which is a
+pause and not a failure — nothing went wrong, the tool is just slower than one step may wait.
 
 ---
 

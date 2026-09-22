@@ -22,6 +22,14 @@ why `effect_class` is a required field with no default (D-004).
 
 Exactly-once is not achievable. At-least-once delivery with effectively-once *outcomes*
 is, and only for tools that can say they are safe to replay.
+
+A `DURABLE` tool (D-023) runs this same sequence in a Celery worker instead of in the
+loop's process, which moves t0-t2 out of the process that is about to be killed: the run
+crashes, the tool finishes anyway, and the resumed run finds SUCCEEDED. The window is not
+abolished — the Celery worker can die too, and at-least-once redelivery then re-runs the
+task — which is exactly why the task executes this protocol rather than trusting the
+queue. Same timeline, different process, and `effect_class` still answers the same
+question at the end of it.
 """
 
 from __future__ import annotations
@@ -48,6 +56,17 @@ class InvocationStatus(StrEnum):
 
     FAILED = "FAILED"
     """Completed with a declared failure. Also replayed, not re-attempted."""
+
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    """
+    Found PENDING by a second attempt at an UNSAFE tool. Nobody will run it again.
+
+    Terminal, and written by whichever attempt discovered the ambiguity — which for a
+    DURABLE tool is a redelivered Celery task, running in a process the loop cannot see.
+    The status is how it tells the loop, because the only channel between those two
+    processes is this row (D-023). Without it the run would wait for a result that is
+    never coming, and report patience where it should report a decision.
+    """
 
 
 class InvocationAction(StrEnum):
@@ -79,6 +98,37 @@ class InvocationDecision:
     action: InvocationAction
     result: str | None = None
     is_error: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class InvocationOutcome:
+    """
+    What a ledger row currently says, with no instruction attached.
+
+    Distinct from `InvocationDecision` on purpose. A decision answers "should I execute?"
+    and can only be produced by the party that intends to — it commits a PENDING row as
+    part of asking. An outcome answers "has this happened yet?", which is what a loop
+    waiting on a tool running in *another process* needs (D-023), and answering it must
+    not claim the invocation.
+
+    Reading a PENDING outcome means "someone is executing this right now". The waiter's
+    correct response is to keep waiting: re-dispatching would duplicate the redelivery
+    the broker already guarantees.
+    """
+
+    status: InvocationStatus
+    result: str | None = None
+    is_error: bool = False
+
+    @property
+    def is_terminal(self) -> bool:
+        """
+        True once the row has stopped changing — nobody is going to run this.
+
+        Includes NEEDS_REVIEW, which is terminal without being a result: waiting longer
+        would not produce one.
+        """
+        return self.status is not InvocationStatus.PENDING
 
 
 def invocation_key(

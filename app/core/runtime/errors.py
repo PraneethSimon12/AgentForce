@@ -155,3 +155,48 @@ class RetriesExhausted(AgentForgeError):
         self.last_error = last_error
         self.run_budget_exhausted = run_budget_exhausted
         """Which bound was hit. The step bound pauses the run; the run bound ends it."""
+
+
+class QueueError(AgentForgeError):
+    """Something went wrong handing work to another process."""
+
+
+class TaskQueueUnavailable(QueueError):
+    """
+    The broker could not be reached, so a durable tool was never queued.
+
+    Retryable, and retried by the same per-step bound that covers a provider blip: the
+    tool has definitely not run, so trying again risks nothing. The alternative — failing
+    the run because Redis was restarting — would make the queue a single point of failure
+    for work that has not even started.
+    """
+
+
+class QueueNotConfigured(QueueError):
+    """
+    A DURABLE tool is registered but there is no queue to dispatch it to.
+
+    Raised while the loop is being constructed, not when the model first asks for the
+    tool. The difference is a process that refuses to start versus a run that dies
+    halfway through at 3am — and the registry is fixed at construction, so the check is
+    answerable there.
+    """
+
+
+class ToolCrashed(ToolError):
+    """
+    An unexpected exception escaped a tool handler. Not a declared failure — a bug.
+
+    Distinct from `ToolExecutionFailed`, which means "the call was well-formed but could
+    not succeed" and is fed back to the model so it can try something else. This one
+    means the tool is broken, and the two callers treat it differently on purpose: the
+    loop fails the run rather than papering over a bug, while a Celery worker lets it
+    propagate so the traceback reaches the worker log. In both cases the ledger row was
+    already completed before this was raised, so a bug never leaves an invocation
+    PENDING — which would otherwise read as "still working" forever.
+    """
+
+    def __init__(self, tool_name: str, cause: Exception) -> None:
+        super().__init__(f"Tool {tool_name!r} raised {type(cause).__name__}: {cause}")
+        self.tool_name = tool_name
+        self.cause = cause

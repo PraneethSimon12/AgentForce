@@ -72,7 +72,7 @@ real request goes out carrying that schema, the claim is half-earned and stays �
 | # | Claim | Evidence required | Phase | Status |
 | --- | --- | --- | --- | --- |
 | 2.1 | "checkpointing step state to PostgreSQL" | One committed row per step; `UNIQUE(run_id, idx)` | v1 | ✅ |
-| 2.2 | "dispatching long-running tools to Celery workers" | A `DURABLE` tool executing off-process | v1 | ⬜ |
+| 2.2 | "dispatching long-running tools to Celery workers" | A `DURABLE` tool executing off-process | v1 | 🟨 |
 | 2.3 | "with idempotency keys" | `tool_invocations` ledger; the key computed before execution | v1 | ✅ |
 | 2.4 | **"a crashed run resumes from its last completed step"** | **The `kill -9` test**: run completes, tool ran exactly once, no duplicate steps | v1 | ✅ |
 
@@ -83,8 +83,24 @@ killed, against a real Postgres. `tests/integration/test_kill9.py`.
   crash-and-resume with no duplicates.
 - **2.3 ✅** — the `tool_invocations` ledger, key written before execution.
 - **2.4 ✅** — the run completes on a replacement worker from its last committed step.
-- **2.2 stays ⬜** — nothing is dispatched to Celery yet (task 1.7). The bullet says
-  "dispatching long-running tools to Celery workers" and today every tool runs INLINE.
+- **2.2 was ⬜** — nothing was dispatched to Celery, and every tool ran INLINE. See below for
+  where it stands after v1.7.
+
+**Status after v1.7 (durable tool dispatch).** `ExecutionMode.DURABLE` is now wired end to end:
+the loop dispatches through a `TaskQueue` port, `CeleryTaskQueue` publishes to Redis, and
+`app.workers.tasks.execute_tool` runs the same `execute_invocation` the inline path uses (D-023).
+The Celery app is configured with `acks_late` + `task_reject_on_worker_lost` + a derived
+visibility timeout, and the worker registers the task.
+
+- **2.2 is 🟨, not ✅, and the gap is specific.** Everything is built and tested, but no test has
+  yet watched a **real Celery worker consume a task from a real broker**. The unit tests use
+  `FakeTaskQueue` (same process); the integration tests call `execute_invocation` directly
+  (same process, real Postgres). Both prove the protocol; neither proves the transport.
+  Until a run completes with a tool executed by `docker compose` worker, "dispatching
+  long-running tools to Celery workers" is a claim about code that exists, not about behaviour
+  observed. **Do not put it on the CV yet.**
+- What 🟨 already covers honestly: at-least-once delivery made effectively-once by the ledger, and
+  the fact that a durable tool survives the death of the process that dispatched it.
 
 ⚠️ **E — be precise about "exactly once" before it reaches the CV.**
 

@@ -26,7 +26,7 @@ from app.adapters.llm.fake_llm import (
     says,
     truncated,
 )
-from app.core.runtime.loop import MAX_TOOL_RESULT_CHARS, AgentLoop
+from app.core.runtime.loop import AgentLoop
 from app.core.runtime.messages import (
     OpaqueBlock,
     TextBlock,
@@ -37,6 +37,7 @@ from app.core.runtime.state import ErrorCode, NewRun, RunLimits, RunOutcome, Run
 from app.core.tools.base import EffectClass, ToolSpec
 from app.core.tools.builtin.calculator import calculator_tool
 from app.core.tools.builtin.clock import clock_tool
+from app.core.tools.execution import MAX_TOOL_RESULT_CHARS
 from app.core.tools.registry import ToolRegistry
 from tests.unit.test_builtin_tools import FrozenClock
 

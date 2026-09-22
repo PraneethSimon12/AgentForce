@@ -94,6 +94,21 @@ class Settings(BaseSettings):
         validation_alias="DATABASE_URL_SYNC",
     )
 
+    # --- Redis / Celery -------------------------------------------------------
+    # Broker only. There is deliberately no result backend (D-023): a durable tool's
+    # result is a row in the ledger, because a result that lives in Redis is run state
+    # we would lose to a FLUSHALL, and D-003 says Redis holds nothing we cannot lose.
+    redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
+
+    # The hard ceiling on one durable tool's execution, enforced by the worker as
+    # Celery's `task_time_limit`. Separate from `step_timeout_seconds` because it bounds
+    # a different thing: the step timeout bounds how long the *loop* waits, this bounds
+    # how long the *tool* runs. A tool that outlives it is killed and redelivered; a tool
+    # that outlives the step timeout keeps running while the run pauses.
+    durable_tool_timeout_seconds: float = Field(
+        default=300.0, gt=0, le=3_600, validation_alias="AGENTFORGE_DURABLE_TOOL_TIMEOUT_SECONDS"
+    )
+
     # --- Observability --------------------------------------------------------
     log_level: LogLevel = Field(default="INFO", validation_alias="LOG_LEVEL")
 

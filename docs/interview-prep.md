@@ -652,6 +652,146 @@ upstream stays stuck. The timeout converts that into a bounded, retried, eventua
 
 ---
 
+## v1.7 — durable tool dispatch · 2026-09-22
+
+Written up from the implementation rather than from a live Q&A — this session skipped the
+teaching protocol at my request. **I have not answered any of these out loud yet.** Come back and
+do that; an answer I have read is not an answer I can give.
+
+---
+
+### Q32 — Why is a Celery task one *tool call* and not one *run*?
+
+Because a task per run would make `DURABLE` mean nothing. Every tool would execute inside whatever
+process happened to be driving the run, which is what already happens — the mode would be a label.
+
+The real argument is what each choice does to the timeouts. A run-scoped task has to contain the
+whole loop, so a ten-minute tool has to fit inside the step timeout *and* inside the lease TTL, and
+both of those are sized for a model call plus a fast tool. You end up raising two unrelated
+settings to accommodate one slow tool, and a genuinely wedged step then holds its lease for ten
+minutes because you cannot tell the two cases apart.
+
+The thing a run-scoped task would buy — something to hand a queued run to — is a real need, but it
+belongs to `POST /v1/runs` (task 1.5), not to this.
+
+---
+
+### Q33 — `acks_late=True` is only half the fix. What is the other half?
+
+`task_reject_on_worker_lost=True`.
+
+By default Celery acknowledges a task when it *starts*, so a worker killed mid-task takes the task
+with it: the broker has already forgotten. `acks_late` moves the acknowledgement to completion,
+which is what makes redelivery possible at all.
+
+But with late acks alone, a task whose worker is `SIGKILL`ed is marked **failed**, not requeued.
+So you pay the full cost of late acknowledgement — a task can be delivered twice, so everything
+downstream must be idempotent — and get none of the benefit, because the one case you enabled it
+for still loses the work. The two settings are a pair, and the failure mode of setting only the
+first is invisible until a worker actually dies.
+
+There is a third that is easy to miss: with Redis as the broker there is no acknowledgement
+channel at all, so "unacknowledged" is implemented as a timer — `visibility_timeout`. Set it below
+the time a tool takes and Redis hands the task to a second worker *while the first is still
+running*. It is derived from the tool timeout in `celery_app.py` rather than configured separately,
+because two numbers that must agree and are set in two places will eventually not agree.
+
+---
+
+### Q34 — A resumed run finds a PENDING ledger row for a durable tool. Why not enqueue it again?
+
+Because the broker has already promised to deliver it, and re-enqueueing would duplicate that
+promise rather than fulfil it.
+
+A PENDING row means some worker claimed the invocation. Either it is executing right now, or it
+died and `acks_late` + `task_reject_on_worker_lost` will hand the task to someone else. In both
+cases another delivery is coming. Adding one of our own gives two workers the same call, and
+whichever loses the unique-constraint race finds a PENDING row and asks `effect_class` what to do
+— which for an `UNSAFE` tool stops the run for review that it did not need.
+
+So the rule is: **enqueue only when there is no row at all.** Each mechanism owns exactly one
+thing — the broker owns delivery, the ledger owns the outcome, the loop owns waiting — and the
+bugs in this area all come from one of them doing another's job.
+
+---
+
+### Q35 — Why is there no Celery result backend?
+
+Because a result in Redis is run state we cannot afford to lose, and D-003 says Redis holds
+nothing we cannot lose. A `FLUSHALL`, an eviction under memory pressure, or a restarted container
+would take a completed tool's output with it — and that output is the only record that the side
+effect happened, which is the thing the whole idempotency design exists to preserve.
+
+The ledger row is a better rendezvous anyway: it is in the same database as the run, so "what did
+this run's tools do?" is one query rather than a join across two systems with different durability
+guarantees. The result backend would be a second, weaker copy of something we already store.
+
+---
+
+### Q36 — If the t1–t2 window still exists, what does DURABLE actually buy?
+
+It moves the window out of the process that is most likely to die.
+
+An inline tool runs in the process driving the run. Kill that process mid-tool and you are in the
+unanswerable window: the ledger says PENDING, the side effect may or may not have happened, and
+only `effect_class` can decide what to do. A durable tool is not in that process — the run can be
+`SIGKILL`ed and the tool finishes anyway, writes its row, and the resumed run replays the recorded
+result without executing anything.
+
+What is honest to say: the window is **moved, not closed**. The Celery worker can also die, and
+at-least-once redelivery then re-runs the task — which is exactly why the task runs the same
+ledger protocol rather than trusting the queue. Anyone claiming a queue gave them exactly-once
+execution has not thought about what happens when the consumer dies after the side effect and
+before the acknowledgement.
+
+---
+
+### Q37 — CLAUDE.md §8 says Celery workers use the sync engine. Why does yours run an async one?
+
+Because §8 is warning about a specific bug, and this is not it. The bug is using the API's async
+engine inside a task — an engine built before `fork` (whose pooled sockets are then shared by two
+processes) or bound to an event loop that is no longer running. Both are fatal and both surface as
+confusing connection errors.
+
+The worker here creates its own event loop and its own engine *inside the forked child*, in
+`worker_process_init`, and both live as long as the process. Nothing is inherited across the fork
+and nothing outlives its loop, so neither half of the trap applies.
+
+What the alternative would have cost: a second `ToolLedger` in sync SQLAlchemy — a duplicate of
+the most subtle SQL in the project (insert-first-and-let-the-constraint-arbitrate, the PENDING
+read, `resolve_pending`) kept in step with the async one by hand, in a file with no integration
+test of its own. `loop.py` already refuses a second implementation of itself for tests on exactly
+that argument.
+
+One loop per *process*, not per task: `asyncio.run` in each task body would bind a connection pool
+to a loop it then destroys, so every task would pay a fresh connect and the pool would never be a
+pool.
+
+---
+
+### Q38 — A durable tool is still running when the step's budget expires. Why pause instead of retry?
+
+Because nothing has gone wrong, and a retry would spend money to rediscover that.
+
+Retrying a step re-issues the model call. If the tool is simply slow, the second call produces the
+same tool call, which hashes to the same key, which finds the same PENDING row — so the run pays
+for a model call to learn something the ledger already knew, does it `max_step_attempts` times,
+and then marks itself `STEP_FAILED` for the crime of calling a slow tool.
+
+Pausing with `TOOL_PENDING` costs one model call total, releases the lease so the worker can do
+something else, and leaves the run resumable. When it comes back the row is terminal and the
+result replays. The status is separate from `STEP_FAILED` because the operator response is
+different: this one needs patience, not investigation.
+
+The detail that took a test to find: the waiting has to stop slightly *before* the hard
+`asyncio.timeout`, or the timeout wins the race and the step is reported as a generic timeout and
+retried — the exact outcome the pause exists to avoid. The reserve is the larger of 5% of the
+budget and 100ms, and it needs both: the fraction keeps it proportionate at a sixty-second budget,
+and the floor exists because event-loop wakeup jitter is absolute, not proportional. A pure
+fraction left a sub-second test budget with less margin than one Windows timer tick.
+
+---
+
 ## Questions I still owe answers to
 
 Open, to be answered as the phases land. Written down now so they are not quietly avoided.
@@ -664,3 +804,8 @@ Open, to be answered as the phases land. Written down now so they are not quietl
 - What is the real failure mode when two workers race a lease — does `SKIP LOCKED` behave as
   expected under contention, or is there a starvation case?
 - How much does prompt caching actually save across a multi-step run, in rupees?
+- Does a real Celery worker, consuming from a real broker, actually execute a durable tool
+  end to end? Everything is built and unit-tested, but no test has watched the transport
+  work (resume-claims 2.2 is partial for exactly this reason).
+- What is the p99 added latency of polling the ledger, versus `LISTEN`/`NOTIFY`, once a step
+  dispatches more than one durable tool?
